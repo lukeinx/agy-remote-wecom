@@ -1,0 +1,63 @@
+// Agy Remote WeCom 配置文件（支持 // 注释与尾随逗号）
+// 保存即可热生效；标明「需重启」的项修改后请执行：agy-remote restart
+{
+  // ==================== 1. 企微机器人与主人绑定（修改后需重启） ====================
+  // 在企业微信「工作台 → 智能机器人 → API 模式 → 长连接」获取 BotID 与 Secret
+  // 也可直接运行 `agy-remote setup` 通过向导填写
+  "botId": "",
+  "secret": "",
+  // 已绑定的主人企微 UserID；留空后运行 `agy-remote bind` 通过 6 位绑定码自动写入
+  "ownerUserId": "",
+
+  // ==================== 2. 会话与终端默认行为（保存即生效） ====================
+  // 手机「创建会话」打开的终端：
+  //   auto（自动探测）| cmux | ghostty | iterm | wezterm | kitty | tmux | terminal | none（仅后台）
+  "terminal": "auto",
+  // 新建会话的默认工作目录（支持 ~）
+  "defaultDir": "~",
+  // 新建后台会话的默认权限模式：
+  //   default（读写需确认）| accept-edits（自动允许改文件）| auto（自动允许编辑与安全命令）| plan（先规划后执行）
+  "defaultMode": "default",
+
+  // ==================== 3. 远程权限确认（保存即生效） ====================
+  // 手机端工具审批策略：
+  //   ask-then-allow（弹卡片，超时自动放行）| ask（弹卡片，超时拒绝）| allow（全部自动放行，不弹卡片）
+  "remoteConfirm": "ask-then-allow",
+  // 权限确认卡片超时时间（毫秒，范围 1000–86400000；默认 600000 = 10 分钟）
+  "remoteConfirmTimeoutMs": 600000,
+
+  // ==================== 4. 目录别名（保存即生效） ====================
+  // 手机发「创建会话 <别名> 消息」或「目录 <别名>」时快速定位到对应路径（支持 ~）
+  // 也可通过 `agy-remote alias <别名> <目录>` / `agy-remote alias rm <别名>` 管理
+  "aliases": {
+    "home": "~"
+  },
+
+  // ==================== 5. 会话自动命名与终端 Tab 标题（保存即生效） ====================
+  "tabTitle": {
+    // 是否启用自动中文标题与终端标签状态图标（true | false）
+    "enabled": true,
+    // OpenAI 兼容 Chat Completions 接口地址（无状态直连，不建 agy 会话）
+    "apiUrl": "https://api.deepseek.com/chat/completions",
+    // API Key：支持 "$环境变量名"（读取同名环境变量）；留空则回退本地规则提取
+    "apiKey": "$DEEPSEEK_API_KEY",
+    // 命名模型 ID（默认 deepseek-v4.1-flash；DeepSeek 官方接口会自动映射为 deepseek-flash）
+    "model": "deepseek-v4.1-flash",
+    // 思考链开关：off（默认，更快更省）| low
+    "thinking": "off"
+  },
+
+  // ==================== 6. 高级设置（按需调整，一般保持默认） ====================
+  // 本机守护进程监听端口（1024–65535，默认 18779；修改后需重启）
+  "localPort": 18779,
+  // agy 可执行文件命令名或绝对路径（默认 "agy"）
+  "agyBin": "agy",
+  // tmux 终端适配器使用的会话名（terminal 为 tmux 时生效）
+  "tmuxSession": "agy",
+  // kitty 终端远控 socket（如 "unix:/tmp/mykitty"；terminal 为 kitty 时按需填写）
+  "kittySocket": "",
+  // 首条消息完成后等待自动命名返回的最大时长（毫秒，默认 5000）
+  "nameWaitMs": 5000,
+  // 后台 ACP 会话空闲自动关闭时长（毫秒，默认 21600000 = 6 小时）
+  "idleCloseMs": 21600000
+}

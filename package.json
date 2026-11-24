@@ -1,0 +1,54 @@
+{
+  "name": "agy-remote-wecom",
+  "version": "0.1.0",
+  "description": "Control local Antigravity (agy) CLI and background ACP sessions from WeCom.",
+  "author": "lukeinx",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lukeinx/agy-remote-wecom.git"
+  },
+  "homepage": "https://github.com/lukeinx/agy-remote-wecom#readme",
+  "bugs": {
+    "url": "https://github.com/lukeinx/agy-remote-wecom/issues"
+  },
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "antigravity",
+    "agy",
+    "acp",
+    "wecom",
+    "wechat-work",
+    "remote-control",
+    "ai-agent",
+    "chatops",
+    "mobile",
+    "企业微信"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "bin": {
+    "agy-remote": "./bin/remote.mjs",
+    "agy-remote-wecom": "./bin/remote.mjs"
+  },
+  "files": [
+    "daemon",
+    "bin",
+    "plugin",
+    "README.md",
+    "config.example.json",
+    "LICENSE",
+    "NOTICE.md"
+  ],
+  "dependencies": {
+    "@wecom/aibot-node-sdk": "1.0.7"
+  },
+  "scripts": {
+    "postinstall": "node ./bin/postinstall.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "for f in bin/*.mjs daemon/*.mjs plugin/*.mjs scripts/*.mjs tests/*.mjs; do node --check \"$f\" || exit 1; done && npm test",
+    "check:public": "node scripts/check-public.mjs",
+    "prepublishOnly": "npm run check && npm run check:public"
+  }
+}

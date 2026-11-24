@@ -1,0 +1,94 @@
+{
+  "source": "pi-remote-wecom main 82acb8b",
+  "help": "**📖 命令表**\n\n---\n\n| 英文 | 中文 |\n|---|---|\n| n | 创建会话 |\n| ls | 活跃会话 |\n| remote / mute | 关注 / 取关 |\n| model | 模型 |\n| think | 思考强度 |\n| cd | 目录 |\n| compact | 压缩 |\n| recap | 回顾 |\n| status | 状态 |\n| stop | 停止 |\n| help | 帮助 |\n\n\n---\n\n**Tips**\n\n> 1. 电脑端 `/remote` 配置\n> 2. 先发附件，5 分钟内补文字一并发送\n> 3. 引用消息，可发送回复给相应会话",
+  "created": {
+    "card": {
+      "card_type": "text_notice",
+      "main_title": {
+        "title": "✏️ 创建会话",
+        "desc": "发「创建会话 目录别名 消息」，指定目录"
+      },
+      "card_action": {
+        "type": 1,
+        "url": "https://work.weixin.qq.com"
+      },
+      "task_id": "TASK",
+      "emphasis_content": {
+        "title": "新会话"
+      },
+      "horizontal_content_list": [
+        {
+          "keyname": "目录",
+          "value": "~"
+        },
+        {
+          "keyname": "类型",
+          "value": "后台会话"
+        },
+        {
+          "keyname": "模型",
+          "value": "test-model"
+        }
+      ]
+    },
+    "fallback": "### ✏️ 会话已创建 · 新会话\n\n---\n\n`目录：~` · `类型：后台会话` · `模型：test-model` · 发送 `创建会话 目录别名 消息`，指定目录"
+  },
+  "selected": {
+    "card": {
+      "card_type": "text_notice",
+      "main_title": {
+        "title": "📥 选择会话",
+        "desc": "已选择，可开始对话"
+      },
+      "card_action": {
+        "type": 1,
+        "url": "https://work.weixin.qq.com"
+      },
+      "task_id": "TASK",
+      "emphasis_content": {
+        "title": "对齐测试"
+      },
+      "sub_title_text": "发送「回顾」，查看上一轮内容",
+      "horizontal_content_list": [
+        {
+          "keyname": "目录",
+          "value": "~"
+        },
+        {
+          "keyname": "类型",
+          "value": "后台会话"
+        },
+        {
+          "keyname": "模型",
+          "value": "test-model"
+        },
+        {
+          "keyname": "上下文",
+          "value": "未知"
+        }
+      ]
+    },
+    "fallback": "### 📥 选择会话 · 对齐测试\n\n---\n\n发送「回顾」，查看上一轮内容\n\n---\n\n`目录：~` · `类型：后台会话` · `模型：test-model` · `上下文：未知`"
+  },
+  "think": {
+    "card": {
+      "card_type": "vote_interaction",
+      "title": "🧠 切换思考强度 · 对齐测试",
+      "desc": "当前 low · 发「思考强度 high」直接切换",
+      "options": [
+        {
+          "id": "OPTION",
+          "text": "low · 低 · ← 当前"
+        },
+        {
+          "id": "OPTION",
+          "text": "high · 高"
+        }
+      ],
+      "mode": 0,
+      "submit_text": "切换思考强度",
+      "task_id": "TASK"
+    },
+    "fallback": "### ⚠️ 卡片发送失败 · 切换思考强度\n\n---\n\nlow · 低 · ← 当前\nhigh · 高\n\n---\n\n发送 `思考强度 high` 直接切换"
+  }
+}
