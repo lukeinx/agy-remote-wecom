@@ -373,6 +373,7 @@ function makeTarget(sessionId, kind, init = {}) {
     transcriptPath: init.transcriptPath || '',
     _transcriptUsageCache: {},
     busy: false,
+    bgActive: false,
     loaded: kind === 'acp',
     replaying: false,
     pid: init.pid || 0,
@@ -381,6 +382,7 @@ function makeTarget(sessionId, kind, init = {}) {
     updatedAt: init.updatedAt || Date.now(),
     currentRun: null,
     queue: [],
+    steers: [],
     lastArtCount: 0,
     label() {
       return stripCtrl(this.customName || this.name || this.firstInput || '') || (this.kind === 'history' ? '会话' : `新会话 · ${tildeDir(this.cwd)}`);
@@ -620,9 +622,16 @@ function pushedOthers(cur) {
 }
 
 // ─────────────────────────── ACP 客户端与事件处理 ───────────────────────────
+function acpArgs(cfg = liveConfig()) {
+  return cfg.acpProcessPerSession === false ? ['acp'] : ['acp', '--process-per-session'];
+}
+function syncAcpLaunchOptions(cfg = liveConfig()) {
+  acp.bin = cfg.agyBin || CFG.agyBin;
+  if (!acp.alive) acp.args = acpArgs(cfg);
+}
 export const acp = new AcpClient({
   bin: CFG.agyBin,
-  args: ['acp'],
+  args: acpArgs(CFG),
   log: (msg) => log(msg),
 });
 
@@ -697,7 +706,7 @@ acp.on('exit', () => {
 
 async function ensureAcpSession(t) {
   if (t.kind === 'tui' && isLiveTarget(t)) throw new Error('该会话仍在终端打开，不能同时由后台加载。请先关闭终端会话，再从历史会话恢复。');
-  acp.bin = liveConfig().agyBin || CFG.agyBin;
+  syncAcpLaunchOptions();
   await acp.start();
   if (t.loaded) return;
   t.replaying = true;
@@ -721,7 +730,7 @@ async function ensureAcpSession(t) {
 }
 
 async function createAcpSession(cwd, initMode = effectiveDefaultMode()) {
-  acp.bin = liveConfig().agyBin || CFG.agyBin;
+  syncAcpLaunchOptions();
   await acp.start();
   const res = await acp.call('session/new', {cwd, mcpServers: []}, 60_000);
   const sid = res.sessionId;
@@ -746,8 +755,9 @@ async function createAcpSession(cwd, initMode = effectiveDefaultMode()) {
   return t;
 }
 
-// ─────────────────────────── 权限确认卡片（ACP + 终端 PreToolUse 共用） ───────────────────────────
+// ─────────────────────────── 权限确认卡片与 ask_question 卡片 ───────────────────────────
 const uiPending = new Map(); // reqId -> entry
+const askPending = new Map(); // reqId -> entry
 
 function pickAlwaysAllowOption(options = []) {
   return options.find((o) => o.kind === 'allow_always' || o.optionId === 'allow_always');
@@ -829,19 +839,139 @@ function openPermissionPrompt(t, params, respond) {
 }
 
 function cancelPermissions(t) {
-  for (const entries of [uiPending]) {
-    for (const [id, entry] of entries) {
-      if (entry.t !== t) continue;
-      entry.done = true;
-      clearTimeout(entry.timer);
-      entries.delete(id);
-      entry.respond({outcome: 'cancelled'});
-    }
+  for (const [id, entry] of uiPending) {
+    if (entry.t !== t) continue;
+    entry.done = true;
+    clearTimeout(entry.timer);
+    uiPending.delete(id);
+    entry.respond({outcome: 'cancelled'});
+  }
+  for (const [id, entry] of askPending) {
+    if (entry.t !== t) continue;
+    entry.done = true;
+    clearTimeout(entry.timer);
+    askPending.delete(id);
+    entry.resolve({decision: 'deny', reason: '任务已取消或结束，无需继续等待作答。'});
   }
 }
 
 function hasPendingUi(t) {
-  return [...uiPending.values()].some((p) => p.t === t && !p.done);
+  return [...uiPending.values()].some((p) => p.t === t && !p.done)
+    || [...askPending.values()].some((p) => p.t === t && !p.done);
+}
+
+function normalizeAskQuestions(rawQuestions) {
+  if (!Array.isArray(rawQuestions)) return [];
+  const out = [];
+  for (const item of rawQuestions) {
+    if (!item || typeof item !== 'object') continue;
+    const question = stripCtrl(item.question || '');
+    const rawOpts = Array.isArray(item.options) ? item.options : [];
+    const options = rawOpts
+      .map((o) => stripCtrl(typeof o === 'string' ? o : (o?.label || o?.text || o?.value || '')))
+      .filter(Boolean)
+      .slice(0, VOTE_OPT_MAX);
+    if (!question || !options.length) continue;
+    out.push({question, options, multi: Boolean(item.is_multi_select)});
+  }
+  return out;
+}
+
+function formatAskDetail(questions, idx) {
+  const q = questions[idx];
+  const header = questions.length > 1 ? `**问题 ${idx + 1}/${questions.length}**：${q.question}` : `**${q.question}**`;
+  const list = q.options.map((opt, i) => `${i + 1}. ${opt}`).join('\n');
+  return `${header}${q.multi ? '（可多选）' : ''}\n\n${list}`;
+}
+
+function sendAskQuestionCard(entry) {
+  const {reqId, t, questions, idx} = entry;
+  const q = questions[idx];
+  const detail = formatAskDetail(questions, idx);
+  const cardOpts = q.options.map((opt, optIdx) => ({
+    id: registerPick({act: 'ask', reqId, qIdx: idx, optIdx, optionText: opt, multi: q.multi}),
+    text: clip(opt, 60),
+  }));
+  const titlePrefix = questions.length > 1 ? `❓ 问题 ${idx + 1}/${questions.length}` : '❓ 确认问题';
+  const descText = q.multi ? `${q.question} · 可多选` : q.question;
+  const card = {
+    card_type: 'vote_interaction',
+    title: clip(`${titlePrefix} · ${t.shortTitle()}`, 26),
+    desc: clip(descText, 44),
+    options: cardOpts,
+    mode: q.multi ? 1 : 0,
+    submit_text: '提交回答',
+    task_id: taskId('ask'),
+  };
+  sendText(detail);
+  sendCard(cardBlock(card, '**请选择回答**', `${detail}\n\n请打开企微卡片点击提交。`));
+}
+
+function openAskQuestionPrompt(t, questions, resolve) {
+  const cfg = liveConfig();
+  const timeoutMs = Math.min(cfg.remoteConfirmTimeoutMs, 600_000);
+  const reqId = `ask_${crypto.randomUUID()}`;
+  const entry = {
+    reqId, t, questions, idx: 0, answers: [], resolve, done: false,
+    timer: setTimeout(() => {
+      if (entry.done) return;
+      entry.done = true;
+      askPending.delete(reqId);
+      resolve({
+        decision: 'deny',
+        reason: '手机远程作答超时未收到回复，请先采用你的推荐方案或说明待确认项后继续。',
+      });
+      sendText(plainText({
+        head: '⏰ 提问已超时',
+        subject: t.label(),
+        body: formatAskDetail(questions, entry.idx),
+        foot: `超过 ${Math.round(timeoutMs / 60000)} 分钟未作答，已通知模型自行推进`,
+      }));
+    }, timeoutMs),
+  };
+  entry.timer.unref?.();
+  askPending.set(reqId, entry);
+  sendAskQuestionCard(entry);
+}
+
+function handleAskPick(picks) {
+  const first = picks[0];
+  const entry = askPending.get(first.reqId);
+  if (!entry || entry.done) return plainText({head: 'ℹ️ 该提问已结束', body: '可能已超时或已在电脑端处理。'});
+  if (first.qIdx !== entry.idx) return plainText({head: 'ℹ️ 该题已作答', subject: entry.t.label()});
+
+  const q = entry.questions[entry.idx];
+  const selectedTexts = picks.map((p) => p.optionText).filter(Boolean);
+  const answerText = selectedTexts.join('、');
+  entry.answers.push({question: q.question, selected: selectedTexts});
+  entry.idx += 1;
+
+  if (entry.idx < entry.questions.length) {
+    sendAskQuestionCard(entry);
+    return plainText({
+      head: '✅ 已收到回答',
+      subject: entry.t.label(),
+      body: `已选择：**${answerText}**`,
+      foot: `请继续作答第 ${entry.idx + 1}/${entry.questions.length} 题`,
+    });
+  }
+
+  entry.done = true;
+  clearTimeout(entry.timer);
+  askPending.delete(entry.reqId);
+  const summary = entry.answers
+    .map((a, i) => (entry.answers.length > 1 ? `${i + 1}. ${a.question} -> ${a.selected.join(', ')}` : `${a.question} -> ${a.selected.join(', ')}`))
+    .join('\n');
+  entry.resolve({
+    decision: 'deny',
+    reason: `用户已通过手机远程回答问题，请直接采纳以下选择继续执行，不要再次调用 ask_question：\n${summary}`,
+  });
+  return plainText({
+    head: '✅ 已提交回答',
+    subject: entry.t.label(),
+    body: `已选择：**${answerText}**`,
+    foot: '任务继续执行中',
+  });
 }
 
 function handleUiPick(pick) {
@@ -964,13 +1094,14 @@ function artHint(t) {
   return `\n\n\u3000\n\n📎 本会话已有 ${list.length} 个产物，回复 \`产物\` 查看`;
 }
 
-function fmtDone(t, run, answerText) {
+function fmtDone(t, run, answerText, {fullyIdle = true} = {}) {
   const foot = [`目录：${dirLabel(t.cwd)}`, `运行：${human((run?.endedAt || Date.now()) - (run?.startedAt || Date.now()))}`];
   const ctx = contextPctLabel(t);
   if (ctx !== '未知') foot.push(`上下文：${ctx}`);
+  if (!run?.stopped && !fullyIdle) foot.push('后台任务/子代理仍在运行，完成后将继续推送');
   const body = (answerText || '（无文本输出）').trim() + artHint(t);
   return sessionText(t, {
-    head: run?.stopped ? '⚠️ 已中断' : '🏁 任务完成',
+    head: run?.stopped ? '⚠️ 已中断' : (!fullyIdle ? '⏳ 阶段完成（后台运行中）' : '🏁 任务完成'),
     subject: t.label(),
     body,
     foot: foot.join(' · '),
@@ -1102,7 +1233,7 @@ function startAcpRun(t, text, media = [], operation = null) {
   return run;
 }
 
-async function deliverToTarget(t, text, media = [], ack = {media: false}) {
+async function deliverToTarget(t, text, media = [], ack = {media: false}, {asyncOnly = false} = {}) {
   ack.media = true;
   pushedIds = [];
   bindCurrent(t);
@@ -1118,9 +1249,14 @@ async function deliverToTarget(t, text, media = [], ack = {media: false}) {
     if (canInject) {
       try {
         const run = makeRun('mobile');
+        if (asyncOnly) run.asyncPushed = true;
         t.pendingMobileRun = run;
         await injectText(t.loc, textWithPaths);
+        if (!t.firstInput) t.firstInput = stripCtrl(text).slice(0, 80);
+        if (!t.customName) triggerAutoNaming(t, text || t.firstInput);
+        t.lastActivity = Date.now();
         watchTerminalAcceptance(t, run);
+        if (asyncOnly) return '';
         const which = await Promise.race([
           run.wait().then(() => 'DONE'),
           new Promise((r) => setTimeout(() => r('TIMEOUT'), SYNC_WINDOW_MS)),
@@ -1144,6 +1280,10 @@ async function deliverToTarget(t, text, media = [], ack = {media: false}) {
     return fmtQueued(t);
   }
   const run = startAcpRun(t, text, media);
+  if (asyncOnly) {
+    run.asyncPushed = true;
+    return '';
+  }
   const which = await Promise.race([
     run.wait().then(() => 'DONE'),
     new Promise((r) => setTimeout(() => r('TIMEOUT'), SYNC_WINDOW_MS)),
@@ -1161,6 +1301,7 @@ async function fetchAcpSessions({timeoutMs = 20_000} = {}) {
   try {
     let timer;
     const work = (async () => {
+      syncAcpLaunchOptions();
       await acp.start();
       const res = await acp.call('session/list', {}, timeoutMs);
       return Array.isArray(res?.sessions) ? res.sessions : [];
@@ -1335,6 +1476,7 @@ async function buildSelectedCard(t) {
 
 function buildCreatedCard(t, note = '') {
   const name = t.shortTitle();
+  const started = Boolean(t.busy || t.pendingMobileRun);
   const facts = [
     {keyname: '目录', value: tildeDir(t.cwd)},
     {keyname: '类型', value: kindOf(t)},
@@ -1345,7 +1487,7 @@ function buildCreatedCard(t, note = '') {
     lead: `**✏️ 已创建 ${clip(name, 20)}**`,
     icon: '✏️',
     title: '创建会话',
-    desc: t.busy ? '任务已开始，完成后推送结果' : '发「创建会话 目录别名 消息」，指定目录',
+    desc: started ? '任务已开始，完成后推送结果' : '发「创建会话 目录别名 消息」，指定目录',
     body: note,
     emph: {title: name},
     emphMax: EMPH_NAME_MAX,
@@ -1353,7 +1495,7 @@ function buildCreatedCard(t, note = '') {
     fallback: () => plainText({
       head: '✏️ 会话已创建',
       subject: name,
-      foot: [`目录：${dirLabel(t.cwd)}`, `类型：${kindOf(t)}`, `模型：${t.model || '未知'}`, note, t.busy ? '' : '发送 `创建会话 目录别名 消息`，指定目录'].filter(Boolean).join(' · '),
+      foot: [`目录：${dirLabel(t.cwd)}`, `类型：${kindOf(t)}`, `模型：${t.model || '未知'}`, note, started ? '' : '发送 `创建会话 目录别名 消息`，指定目录'].filter(Boolean).join(' · '),
     }),
   });
 }
@@ -1804,11 +1946,20 @@ function buildStatus(t = currentTarget()) {
   const stopHint = t === currentTarget() ? '发送 `停止` 停止' : '引用消息，回复会发给该会话';
   if (t.busy || t.pendingMobileRun) {
     const r = t.currentRun || t.pendingMobileRun || {startedAt: Date.now()};
+    const steerNote = t.steers?.length ? `，待注入插话 ${t.steers.length} 条` : '';
     return sessionText(t, {
       head: t.pendingMobileRun ? '⏳ 等待终端接收' : '⏳ 运行中',
       subject: t.label(),
-      body: `已${t.pendingMobileRun ? '等待' : '运行'} ${human(Date.now() - r.startedAt)}${r.tool ? `，当前动作：${r.tool}` : ''}。\n\n${info}`,
+      body: `已${t.pendingMobileRun ? '等待' : '运行'} ${human(Date.now() - r.startedAt)}${r.tool ? `，当前动作：${r.tool}` : ''}${steerNote}。\n\n${info}`,
       foot: [...tunnel, ...mutedFoot(), ...updateFoot(), stopHint].join(' · '),
+    });
+  }
+  if (t.bgActive) {
+    return sessionText(t, {
+      head: '⏳ 后台任务运行中',
+      subject: t.label(),
+      body: `主轮次已暂停，后台任务或子代理仍在运行，完成后会自动推送。\n\n${info}`,
+      foot: [...tunnel, ...mutedFoot(), ...updateFoot()].join(' · '),
     });
   }
   return sessionText(t, {
@@ -1835,7 +1986,7 @@ async function buildUsage(rest = '') {
     }
     return plainText({
       head: '📊 模型用量',
-      body: formatUsageBody(groups, {now: fetchedAt}),
+      body: formatUsageBody(groups, {now: fetchedAt, currentModel: currentTarget()?.model || ''}),
       foot: `更新：${formatUsageClock(fetchedAt)} · 发送 \`模型\` 切换模型`,
     });
   } catch (e) {
@@ -1899,6 +2050,8 @@ function muteAll() {
 async function stopCurrentTask(t = currentTarget()) {
   if (!t) return NO_BIND();
   t.queue = [];
+  t.steers = [];
+  t.bgActive = false;
   if (!t.busy && !t.pendingMobileRun) {
     return plainText({head: '🧊 无需中断', subject: t.label(), body: '当前会话已空闲。'});
   }
@@ -1990,7 +2143,7 @@ async function newTerminalSession(cwd, msg, media, ack) {
   });
   bindCurrent(claimed);
   if (msg || media?.length) {
-    const delivered = await deliverToTarget(claimed, msg || '（见附件，请先查看）', media, ack);
+    const delivered = await deliverToTarget(claimed, msg || '（见附件，请先查看）', media, ack, {asyncOnly: true});
     if (!ack.media) return delivered;
     await waitForAutoName(claimed);
   }
@@ -2120,11 +2273,13 @@ const NL_ALIASES = [
   ['取消关注', 'mute', false],
   ['取关', 'mute', false],
   ['静音', 'mute', false],
+  ['插话', 'steer', true],
+  ['纠偏', 'steer', true],
   ['帮助', 'help', false],
 ].sort((a, b) => b[0].length - a[0].length);
 
-const COMMANDS = new Set(['ls', 'h', 'n', 'nb', 'model', 'think', 'mode', 'name', 'cd', 'compact', 'restart', 'art', 'recap', 'remote', 'mute', 'status', 'usage', 'quota', 'stop', 'help']);
-const BARE_ARGS = new Set(['h', 'n', 'nb', 'model', 'cd', 'think', 'mode', 'name', 'compact', 'restart']);
+const COMMANDS = new Set(['ls', 'h', 'n', 'nb', 'model', 'think', 'mode', 'name', 'cd', 'compact', 'restart', 'art', 'recap', 'remote', 'mute', 'steer', 'status', 'usage', 'quota', 'stop', 'help']);
+const BARE_ARGS = new Set(['h', 'n', 'nb', 'model', 'cd', 'think', 'mode', 'name', 'compact', 'restart', 'steer']);
 
 export function parseCmd(text) {
   const t = String(text || '').trim();
@@ -2160,6 +2315,7 @@ const helpText = () => [
     "| n / nb | 创建会话 / 后台会话 |",
     "| ls / h | 活跃会话 / 历史会话 |",
     "| remote / mute | 关注 / 取关 |",
+    "| steer | 插话 |",
     "| model | 模型 |",
     "| think | 思考强度 |",
     "| mode | 模式 |",
@@ -2359,6 +2515,7 @@ export async function handleCommand(text, media = [], ack = {media: false}, {quo
   if (cmd === 'status') return buildStatusPicker();
   if (cmd === 'usage') return buildUsage(rest);
   if (cmd === 'stop') return stopCurrentTask(currentTarget());
+  if (cmd === 'steer') return handleSteerCommand(rest, media, ack, currentTarget());
   if (cmd === 'remote') return remoteAll();
   if (cmd === 'mute') return muteAll();
   if (cmd === 'restart') {
@@ -2379,6 +2536,39 @@ export async function handleCommand(text, media = [], ack = {media: false}, {quo
   return helpText();
 }
 
+function handleSteerCommand(rest = '', media = [], ack = {media: false}, t = currentTarget()) {
+  const msg = String(rest || '').trim();
+  if (!msg && !media?.length) {
+    return plainText({
+      head: '💬 运行中插话',
+      body: '终端任务执行中可随时插入纠偏指令，在下一次模型调用前注入上下文，无需中断重来。',
+      foot: '用法：`插话 改用方案 B` 或 `steer 改用方案 B`',
+    });
+  }
+  if (!t) return NO_BIND();
+  if (!t.busy && !t.pendingMobileRun) {
+    return deliverToTarget(t, msg, media, ack);
+  }
+  ack.media = true;
+  const {textWithPaths} = composeMediaPrompt(msg, media);
+  if (t.kind === 'tui' && isLiveTarget(t)) {
+    t.steers.push({text: textWithPaths, at: Date.now()});
+    return sessionText(t, {
+      head: '💬 已加入插话',
+      subject: t.label(),
+      body: `> ${clipWidth(stripCtrl(msg || '（见附件）'), 40)}\n\n\u3000\n\n将在本轮下一次模型调用前注入上下文（当前待注入 ${t.steers.length} 条）。`,
+      foot: '若本轮已无后续工具调用，将在结束时自动续跑',
+    });
+  }
+  t.queue.push({text: msg, media});
+  return sessionText(t, {
+    head: '⏳ 已加入排队',
+    subject: t.label(),
+    body: `后台 ACP 会话暂不支持运行中注入，已加入排队（当前 ${t.queue.length} 条），本轮结束后立即执行。`,
+    foot: '发送 `停止` 中断当前任务并清空队列',
+  });
+}
+
 function retryHintForTask(tid = '', pick = null) {
   if (pick) {
     const mapped = {
@@ -2390,6 +2580,7 @@ function retryHintForTask(tid = '', pick = null) {
       art: '产物',
       status: '状态',
       ui: '状态',
+      ask: '状态',
     }[pick.act];
     if (mapped) return mapped;
   }
@@ -2407,6 +2598,7 @@ function retryHintForTask(tid = '', pick = null) {
     art: '产物',
     status: '状态',
     perm: '状态',
+    ask: '状态',
   }[tag] || '帮助';
 }
 
@@ -2424,10 +2616,10 @@ export async function handleCardCallback({taskId: tid, optionId, optionIds = []}
   const picks = (optionIds.length ? optionIds : [optionId]).map((id) => cardPicks.get(id)).filter(Boolean);
   const pick = picks[0];
   const retry = retryHintForTask(tid, pick);
-  if (!tid || !pick || picks.some((p) => p.taskId !== tid || (p.act !== 'ui' && Date.now() - p.at > CARD_TTL_MS)) || picks.length !== (optionIds.length || 1)) {
+  if (!tid || !pick || picks.some((p) => p.taskId !== tid || (p.act !== 'ui' && p.act !== 'ask' && Date.now() - p.at > CARD_TTL_MS)) || picks.length !== (optionIds.length || 1)) {
     return plainText({head: '⚠️ 卡片已失效', foot: `发送 \`${retry}\` 重新选择`});
   }
-  if (pick.act !== 'art' && picks.length !== 1) return '这张卡片只能选择一项，请重新选择。';
+  if (pick.act !== 'art' && !(pick.act === 'ask' && pick.multi) && picks.length !== 1) return '这张卡片只能选择一项，请重新选择。';
   if (consumeTask(tid)) return `这张卡片已经提交过，请发送 \`${retry}\` 获取新卡片。`;
 
   if (pick.act === 'create') {
@@ -2469,6 +2661,9 @@ export async function handleCardCallback({taskId: tid, optionId, optionIds = []}
   if (pick.act === 'ui') {
     return handleUiPick(pick);
   }
+  if (pick.act === 'ask') {
+    return handleAskPick(picks);
+  }
   return '';
 }
 
@@ -2503,7 +2698,7 @@ export async function handleHookEvent(body) {
     clearTimeout(run?.acceptTimer);
     cancelPermissions(t);
     updateTargetTabStatus(t, 'idle', {tabTitleEnabled: false});
-    t.kind = 'history'; t.loaded = false; t.busy = false;
+    t.kind = 'history'; t.loaded = false; t.busy = false; t.bgActive = false;
     t.currentRun = null; t.pendingMobileRun = null;
     saveTuiSessions();
     if (run && !run.settled) {
@@ -2511,8 +2706,9 @@ export async function handleHookEvent(body) {
       const msg = fmtFail(t, run);
       if (run.settle(msg) && run.asyncPushed) void sendText(msg).catch(() => {});
     }
-    if (t.queue.length) void sendText(plainText({head: '⚠️ 排队消息未执行', subject: t.label(), body: '终端已关闭，请选择会话后重发。'})).catch(() => {});
+    if (t.queue.length || t.steers.length) void sendText(plainText({head: '⚠️ 排队消息未执行', subject: t.label(), body: '终端已关闭，请选择会话后重发。'})).catch(() => {});
     t.queue = [];
+    t.steers = [];
     return {};
   }
 
@@ -2563,6 +2759,7 @@ export async function handleHookEvent(body) {
   if (ev === 'PreInvocation') {
     const cfg = liveConfig();
     if (input && !t.customName) triggerAutoNaming(t, input);
+    t.bgActive = false;
     if (!t.busy) {
       clearTimeout(t.pendingMobileRun?.acceptTimer);
       t.busy = true;
@@ -2573,6 +2770,14 @@ export async function handleHookEvent(body) {
       t.pendingMobileRun = null;
     }
     updateTargetTabStatus(t, 'running', {tabTitleEnabled: readNamingPref(cfg).enabled});
+    if (t.steers.length) {
+      const drained = t.steers.splice(0, t.steers.length);
+      return {
+        injectSteps: drained.map((s) => ({
+          userMessage: `[来自企微手机运行中插话]: ${s.text}`,
+        })),
+      };
+    }
     return {};
   }
 
@@ -2582,6 +2787,13 @@ export async function handleHookEvent(body) {
     const isMobileTurn = t.currentRun?.origin === 'mobile';
     // 电脑端自己操作的轮次（即使开启了「关注」）直接返回 ask 交给电脑终端自身决定，不阻塞电脑端操作
     if (!isMobileTurn) return {decision: 'ask'};
+    if (tc.name === 'ask_question') {
+      const questions = normalizeAskQuestions(tc.args?.questions || tc.rawInput?.questions);
+      if (!questions.length) return {decision: 'ask'};
+      return new Promise((resolve) => {
+        openAskQuestionPrompt(t, questions, resolve);
+      });
+    }
     if (shouldAutoAllowPermission(tc, t)) return {decision: 'allow'};
 
     return new Promise((resolve) => {
@@ -2621,9 +2833,11 @@ export async function handleHookEvent(body) {
     const termReason = String(body.terminationReason || '');
     const canceled = termReason === 'USER_CANCELED';
     const errored = Boolean(body.error) || ['ERROR', 'MAX_INVOCATIONS', 'MAX_TOKEN_BUDGET_EXCEEDED'].includes(termReason);
+    const stillRunningBg = !canceled && !errored && body.fullyIdle === false;
+    t.bgActive = stillRunningBg;
     run.stopped = canceled;
     if (errored) run.error = body.error || termReason;
-    updateTargetTabStatus(t, canceled ? 'idle' : errored ? 'error' : 'done', {tabTitleEnabled: readNamingPref(cfg).enabled});
+    updateTargetTabStatus(t, canceled ? 'idle' : errored ? 'error' : stillRunningBg ? 'running' : 'done', {tabTitleEnabled: readNamingPref(cfg).enabled});
     if (t.customName) {
       syncSummaryDbTitle(cfg.agyDataDir, sid, t.customName);
       setTimeout(() => syncSummaryDbTitle(liveConfig().agyDataDir, sid, t.customName), 1500).unref?.();
@@ -2631,7 +2845,9 @@ export async function handleHookEvent(body) {
 
     cancelPermissions(t);
     const current = lastAnswer(steps.slice(run.startStepCount));
-    const msg = errored ? fmtFail(t, run) : fmtDone(t, run, current?.answer || (canceled ? '任务已中断。' : '（本轮无文本输出）'));
+    const msg = errored
+      ? fmtFail(t, run)
+      : fmtDone(t, run, current?.answer || (canceled ? '任务已中断。' : '（本轮无文本输出）'), {fullyIdle: !stillRunningBg});
     run.settle(msg);
 
     const shouldPush = (run.origin === 'mobile' && run.asyncPushed)
@@ -2643,10 +2859,16 @@ export async function handleHookEvent(body) {
     }
 
     if (canceled || errored) {
-      if (t.queue.length) void sendText(plainText({head: '⚠️ 排队消息未执行', subject: t.label(), body: `${t.queue.length} 条排队消息已取消，请检查后重发。`})).catch(() => {});
+      const dropped = t.queue.length + t.steers.length;
+      if (dropped) void sendText(plainText({head: '⚠️ 排队消息未执行', subject: t.label(), body: `${dropped} 条排队消息已取消，请检查后重发。`})).catch(() => {});
       t.queue = [];
+      t.steers = [];
     }
-    if (t.queue.length && (injectKind(t.loc) || !body.continuationActive)) {
+    if (!stillRunningBg && t.steers.length) {
+      const leftover = t.steers.splice(0, t.steers.length);
+      t.queue.unshift({text: leftover.map((s) => s.text).join('\n\n'), media: []});
+    }
+    if (!stillRunningBg && t.queue.length && (injectKind(t.loc) || !body.continuationActive)) {
       const next = t.queue.shift();
       if (injectKind(t.loc)) {
         const nextRun = makeRun('mobile');
@@ -2675,9 +2897,9 @@ export async function handleHookEvent(body) {
 }
 
 // ─────────────────────────── 企微传输与本地 HTTP 服务 ───────────────────────────
-const PRIORITY_COMMANDS = new Set(['stop', 'status', 'help', 'usage', 'remote', 'mute']);
+const PRIORITY_COMMANDS = new Set(['stop', 'status', 'help', 'usage', 'remote', 'mute', 'steer']);
 export function isPriorityCardEvent(ev) {
-  return /^task_perm_/.test(String(ev?.task_id || ''));
+  return /^task_(?:perm|ask)_/.test(String(ev?.task_id || ''));
 }
 export function isPriorityCommandText(text) {
   const parsed = parseCmd(text);

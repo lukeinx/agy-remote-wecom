@@ -144,7 +144,11 @@ function readDaemonEndpoint(cfg = readLocalConfig()) {
 
 // 首次安装后第一次打开 agy 且尚未配置 botId/secret 时，在 SessionStart 给出一行一次性引导
 const cfg = readLocalConfig();
-if (payload.hookEventName === 'PreToolUse' && isAutoAllowedByAgy(cfg, payload.toolCall)) {
+if (
+  payload.hookEventName === 'PreToolUse' &&
+  payload.toolCall?.name !== 'ask_question' &&
+  isAutoAllowedByAgy(cfg, payload.toolCall)
+) {
   process.stdout.write(JSON.stringify({decision: 'ask'}) + '\n');
   process.exit(0);
 }

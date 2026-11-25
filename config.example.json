@@ -52,6 +52,8 @@
   "localPort": 18779,
   // agy 可执行文件命令名或绝对路径（默认 "agy"）
   "agyBin": "agy",
+  // 后台 ACP 会话是否按会话隔离独立进程（true | false；默认 true，修改后需重启）
+  "acpProcessPerSession": true,
   // tmux 终端适配器使用的会话名（terminal 为 tmux 时生效）
   "tmuxSession": "agy",
   // kitty 终端远控 socket（如 "unix:/tmp/mykitty"；terminal 为 kitty 时按需填写）

@@ -7,6 +7,8 @@ import {execFileSync} from 'node:child_process';
 import {
   parseAgyUsageOutput,
   formatUsageBody,
+  formatGroupModels,
+  groupMatchesModel,
   formatResetLabel,
   formatResetDuration,
   formatLocalResetClock,
@@ -114,10 +116,10 @@ test('parseAgyUsageOutput parses structured groups, sorts 5h before weekly, and 
   assert.throws(() => parseAgyUsageOutput('not json at all'), /无法解析/);
 });
 
-test('formatUsageBody renders grouped markdown with clean reset labels', () => {
+test('formatUsageBody renders grouped markdown tables with compacted models and current tag', () => {
   const now = Date.parse('2026-11-19T01:01:00Z');
   const {groups} = parseAgyUsageOutput(JSON.stringify(SAMPLE_USAGE_JSON));
-  const body = formatUsageBody(groups, {now});
+  const body = formatUsageBody(groups, {now, currentModel: 'gemini-4-neon-medium'});
 
   const abs5h = formatLocalResetClock(new Date('2026-11-19T05:47:50Z'), new Date(now));
   const absWk = formatLocalResetClock(new Date('2026-11-26T00:47:50Z'), new Date(now));
@@ -126,24 +128,53 @@ test('formatUsageBody renders grouped markdown with clean reset labels', () => {
   assert.equal(
     body,
     [
-      '**Gemini Models**',
-      '> Gemini 4 Neon · Gemini 4 Hydrogen · Orchestrator (Neon) · Gemini 3.8 Flash',
-      `- 5小时：剩余 **91%** · 4小时46分后重置（${abs5h}）`,
-      `- 每周：剩余 **97%** · 6天23小时后重置（${absWk}）`,
+      '**Gemini Models** `当前`',
+      '',
+      '| 窗口 | 剩余 | 重置 |',
+      '|---|---|---|',
+      `| 5小时 | **91%** | 4h46m · ${abs5h} |`,
+      `| 每周 | **97%** | 6天23h · ${absWk} |`,
+      '',
+      '> Gemini 4 (Neon / Hydrogen) · Orchestrator (Neon) · Gemini 3.8 Flash',
       '',
       '**Claude and GPT models**',
+      '',
+      '| 窗口 | 剩余 | 重置 |',
+      '|---|---|---|',
+      '| 5小时 | **100%** | — |',
+      '| 每周 | **100%** | — |',
+      '',
       '> Claude Opus 5.5 · Claude Sonnet 5.5 · GPT-OSS 120B',
-      '- 5小时：剩余 **100%**',
-      '- 每周：剩余 **100%**',
       '',
       '**Gemini 4 Argon**',
-      `- 每周：剩余 **93%** · 6天23小时后重置（${absArgon}）`,
+      '',
+      '| 窗口 | 剩余 | 重置 |',
+      '|---|---|---|',
+      `| 每周 | **93%** | 6天23h · ${absArgon} |`,
     ].join('\n'),
   );
 
-  assert.equal(formatResetDuration(45 * 60_000), '45分');
+  assert.equal(
+    formatGroupModels([
+      'Gemini 4 Neon',
+      'Gemini 4 Carbon',
+      'Gemini 4 Argon',
+      'Gemini 4 Hydrogen',
+      'Orchestrator (Neon)',
+      'Orchestrator (Carbon)',
+      'Orchestrator (Argon)',
+      'Gemini 3.8 Flash',
+    ]),
+    'Gemini 4 (Neon / Carbon / Argon / Hydrogen) · Orchestrator (Neon / Carbon / Argon) · Gemini 3.8 Flash',
+  );
+  assert.equal(groupMatchesModel(groups[0], 'Gemini 4 Neon (Medium)'), true);
+  assert.equal(groupMatchesModel(groups[1], 'claude-opus-5.5-high'), true);
+  assert.equal(groupMatchesModel(groups[2], 'gemini-4-argon'), true);
+  assert.equal(groupMatchesModel(groups[1], 'gemini-4-neon'), false);
+
+  assert.equal(formatResetDuration(45 * 60_000), '45m');
   assert.equal(formatResetDuration(30_000), '1分钟内');
-  assert.equal(formatResetLabel({remainingFraction: 0.5, resetTime: '2026-11-19T01:01:30Z'}, now), '1分钟内重置');
+  assert.equal(formatResetLabel({remainingFraction: 0.5, resetTime: '2026-11-19T01:01:30Z'}, now), '1分钟内');
   assert.equal(formatResetLabel({remainingFraction: 0.5, resetTime: '2026-11-19T01:00:00Z'}, now), '即将重置');
 });
 
@@ -198,8 +229,8 @@ test('usage command works across daemon and CLI without active session, ACP, or 
       assert.match(reply, /\\*\\*Gemini Models\\*\\*/);
       assert.match(reply, /\\*\\*Claude and GPT models\\*\\*/);
       assert.match(reply, /\\*\\*Gemini 4 Argon\\*\\*/);
-      assert.match(reply, /- 5小时：剩余 \\*\\*91%\\*\\*/);
-      assert.match(reply, /- 每周：剩余 \\*\\*97%\\*\\*/);
+      assert.match(reply, /\\| 5小时 \\| \\*\\*91%\\*\\* \\|/);
+      assert.match(reply, /\\| 每周 \\| \\*\\*97%\\*\\* \\|/);
       assert.match(reply, /发送 \`模型\` 切换模型/);
 
       const meta = JSON.parse(fs.readFileSync(${JSON.stringify(envLog)}, 'utf8'));

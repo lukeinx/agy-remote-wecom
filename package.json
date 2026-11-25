@@ -1,6 +1,6 @@
 {
   "name": "agy-remote-wecom",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Control local Antigravity (agy) CLI and background ACP sessions from WeCom.",
   "author": "lukeinx",
   "repository": {

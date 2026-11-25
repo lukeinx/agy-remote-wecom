@@ -61,6 +61,7 @@ npm ci --ignore-scripts
 | `art` | `产物` / `查看产物` | 查看或下载当前会话生成的文档/图片产物 |
 | `recap` | `回顾` | 推送当前会话上一轮完整提问与最终回复 |
 | `remote` / `mute` | `关注` / `取关` | 开启全部终端任务完成推送 / 静音电脑端发起的任务推送 |
+| `steer` | `插话 <内容>` / `纠偏 <内容>` | 终端任务运行中插入纠偏指令，无需中断重来 |
 | `usage` / `quota` | `用量` / `额度` | 按模型分组查看剩余额度与重置时间（`用量 刷新` 强制刷新） |
 | `status` / `stop` / `restart` / `help` | `状态` / `停止` / `重启 [force]` / `帮助` | 查看状态与上下文占用、中断任务、重启服务、查看全部命令 |
 
@@ -108,7 +109,7 @@ npm ci --ignore-scripts
 
 - 主要支持平台为 **macOS**；其他系统可通过 `agy-remote run` 前台运行，未声明完整支持。
 - 仅接受已绑定主人的单聊消息；电脑休眠或断网期间离线。后台会话继承本机 `agy` 环境，具备读写文件与执行命令能力。
-- 权限审批会自动遵循 `~/.gemini/antigravity-cli/settings.json` 中的 `toolPermission: "always-proceed"` 与 `permissions.allow`；其余需要确认的工具调用按 `remoteConfirm`（默认 `ask-then-allow`，超时 10 分钟）推送到手机。`agy` 内置 `ask_question` 暂不支持手机端卡片作答。
+- 权限审批会自动遵循 `~/.gemini/antigravity-cli/settings.json` 中的 `toolPermission: "always-proceed"` 与 `permissions.allow`；其余需要确认的工具调用按 `remoteConfirm`（默认 `ask-then-allow`，超时 10 分钟）推送到手机。终端会话中手机发起轮次触发 `ask_question` 时，会推送单选/多选卡片到手机作答并回传给模型继续执行。
 - 卸载前运行 `agy-remote uninstall` 停止服务并移除插件，再卸载 npm 包；配置与日志保留在 `~/.config/agy-remote-wecom/`，按需手动清理。
 
 ## 开发

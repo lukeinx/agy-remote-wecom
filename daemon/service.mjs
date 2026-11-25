@@ -11,11 +11,33 @@ const domain = () => `gui/${process.getuid()}`;
 export const SERVICE_FILE = path.join(os.homedir(), 'Library', 'LaunchAgents', `${LABEL}.plist`);
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const xml = s => String(s).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&apos;'}[c]));
-export function plist({node = process.execPath, packageRoot = root, runDir = RUN_DIR, envPath = process.env.PATH || ''} = {}) {
+export function namingEnvVars(cfg = null, env = process.env) {
+  const out = {};
+  let resolvedCfg = cfg;
+  if (!resolvedCfg) {
+    try { resolvedCfg = loadConfig(); } catch { resolvedCfg = {}; }
+  }
+  const names = new Set(['DEEPSEEK_API_KEY']);
+  const rawKey = String(resolvedCfg?.tabTitle?.apiKey || '').trim();
+  if (rawKey.startsWith('$') && /^[A-Za-z_][A-Za-z0-9_]*$/.test(rawKey.slice(1))) {
+    names.add(rawKey.slice(1));
+  }
+  for (const name of names) {
+    const val = String(env?.[name] || '').trim();
+    if (val) out[name] = val;
+  }
+  return out;
+}
+export function plist({node = process.execPath, packageRoot = root, runDir = RUN_DIR, envPath = process.env.PATH || '', extraEnv = namingEnvVars()} = {}) {
+  const envEntries = {PATH: envPath, AGY_REMOTE_HOME: runDir, ...(extraEnv && typeof extraEnv === 'object' ? extraEnv : {})};
+  const envXml = Object.entries(envEntries)
+    .filter(([, v]) => v !== undefined && v !== null)
+    .map(([k, v]) => `<key>${xml(k)}</key><string>${xml(v)}</string>`)
+    .join('');
   return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>
 <key>Label</key><string>${LABEL}</string>
 <key>ProgramArguments</key><array><string>${xml(node)}</string><string>${xml(path.join(packageRoot, 'daemon', 'daemon.mjs'))}</string></array>
-<key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(envPath)}</string><key>AGY_REMOTE_HOME</key><string>${xml(runDir)}</string></dict>
+<key>EnvironmentVariables</key><dict>${envXml}</dict>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>
 <key>StandardOutPath</key><string>${xml(path.join(runDir, 'service.log'))}</string>
 <key>StandardErrorPath</key><string>${xml(path.join(runDir, 'service.log'))}</string>

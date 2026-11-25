@@ -157,9 +157,9 @@ export function formatResetDuration(ms) {
   const d = Math.floor(totalMin / 1440);
   const h = Math.floor((totalMin % 1440) / 60);
   const m = totalMin % 60;
-  if (d > 0) return h ? `${d}天${h}小时` : `${d}天`;
-  if (h > 0) return m ? `${h}小时${m}分` : `${h}小时`;
-  return `${m}分`;
+  if (d > 0) return h ? `${d}天${h}h` : `${d}天`;
+  if (h > 0) return m ? `${h}h${m}m` : `${h}h`;
+  return `${m}m`;
 }
 
 export function formatLocalResetClock(date, nowDate = new Date()) {
@@ -187,21 +187,87 @@ export function formatResetLabel(bucket = {}, now = Date.now()) {
   const diff = resetMs - now;
   if (diff <= 0) return '即将重置';
   const rel = formatResetDuration(diff);
-  if (rel === '1分钟内') return '1分钟内重置';
+  if (rel === '1分钟内') return '1分钟内';
   const abs = formatLocalResetClock(new Date(resetMs), new Date(now));
-  return `${rel}后重置（${abs}）`;
+  return `${rel} · ${abs}`;
 }
 
-export function formatUsageBody(groups = [], {now = Date.now()} = {}) {
+const MODEL_EFFORT_SUFFIX_RE = /(?:\s*\((?:low|medium|high|xhigh|max)\)|-(?:low|medium|high|xhigh|max))$/i;
+
+function normalizeModelTokens(value = '') {
+  return String(value || '')
+    .trim()
+    .replace(MODEL_EFFORT_SUFFIX_RE, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+export function groupMatchesModel(group = {}, currentModel = '') {
+  const cur = normalizeModelTokens(currentModel);
+  if (!cur) return false;
+  const candidates = group.models?.length ? group.models : [group.name];
+  return candidates.some((name) => {
+    const norm = normalizeModelTokens(name);
+    return Boolean(norm) && (cur === norm || cur.startsWith(`${norm} `) || norm.startsWith(`${cur} `));
+  });
+}
+
+export function formatGroupModels(models = []) {
+  const list = (Array.isArray(models) ? models : []).map((s) => String(s || '').trim()).filter(Boolean);
+  if (!list.length) return '';
+
+  const parsed = list.map((raw) => {
+    const paren = /^(.+?)\s*\(([^()]+)\)$/.exec(raw);
+    if (paren) return {raw, key: `p:${paren[1].trim()}`, base: paren[1].trim(), variant: paren[2].trim()};
+    const ver = /^([A-Za-z][A-Za-z0-9-]*\s+\d+(?:\.\d+)*)\s+(.+)$/.exec(raw);
+    if (ver) return {raw, key: `v:${ver[1].trim()}`, base: ver[1].trim(), variant: ver[2].trim()};
+    return {raw, key: '', base: '', variant: ''};
+  });
+
+  const groups = new Map();
+  for (const item of parsed) {
+    if (!item.key) continue;
+    const arr = groups.get(item.key) || [];
+    arr.push(item);
+    groups.set(item.key, arr);
+  }
+
+  const emitted = new Set();
+  const out = [];
+  for (const item of parsed) {
+    const bucket = item.key ? groups.get(item.key) : null;
+    if (bucket && bucket.length >= 2) {
+      if (emitted.has(item.key)) continue;
+      emitted.add(item.key);
+      out.push(`${item.base} (${bucket.map((x) => x.variant).join(' / ')})`);
+    } else {
+      out.push(item.raw);
+    }
+  }
+  return out.join(' · ');
+}
+
+const escapeCell = (s) => String(s || '').replace(/\|/g, '\\|');
+
+export function formatUsageBody(groups = [], {now = Date.now(), currentModel = ''} = {}) {
   return groups
     .map((group) => {
-      const lines = [`**${group.name}**`];
-      if (group.models?.length) lines.push(`> ${group.models.join(' · ')}`);
+      const tag = groupMatchesModel(group, currentModel) ? ' `当前`' : '';
+      const lines = [
+        `**${group.name}**${tag}`,
+        '',
+        '| 窗口 | 剩余 | 重置 |',
+        '|---|---|---|',
+      ];
       for (const bucket of group.buckets || []) {
+        const win = escapeCell(windowLabel(bucket));
         const pct = formatPercent(bucket.remainingFraction);
-        const reset = formatResetLabel(bucket, now);
-        lines.push(`- ${windowLabel(bucket)}：剩余 **${pct}**${reset ? ` · ${reset}` : ''}`);
+        const reset = escapeCell(formatResetLabel(bucket, now) || '—');
+        lines.push(`| ${win} | **${pct}** | ${reset} |`);
       }
+      const modelsLine = formatGroupModels(group.models);
+      if (modelsLine) lines.push('', `> ${modelsLine}`);
       return lines.join('\n');
     })
     .join('\n\n');

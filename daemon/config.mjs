@@ -46,6 +46,7 @@ export const DEFAULTS = {
   tmuxSession: 'agy',
   kittySocket: '',
   agyBin: 'agy',
+  acpProcessPerSession: true,
   inboxDir: path.join(RUN_DIR, 'inbox'),
   agyDataDir: process.env.AGY_REMOTE_HOME
     ? path.join(RUN_DIR, 'agy-data')
@@ -336,6 +337,11 @@ export function formatConfigJsonc(raw = {}) {
       comments: ['agy 可执行文件命令名或绝对路径（默认 "agy"）'],
     },
     {
+      key: 'acpProcessPerSession',
+      value: typeof src.acpProcessPerSession === 'boolean' ? src.acpProcessPerSession : DEFAULTS.acpProcessPerSession,
+      comments: ['后台 ACP 会话是否按会话隔离独立进程（true | false；默认 true，修改后需重启）'],
+    },
+    {
       key: 'tmuxSession',
       value: src.tmuxSession ?? DEFAULTS.tmuxSession,
       comments: ['tmux 终端适配器使用的会话名（terminal 为 tmux 时生效）'],
@@ -386,7 +392,7 @@ export function formatConfigJsonc(raw = {}) {
     'remoteConfirm', 'remoteConfirmTimeoutMs',
     'aliases', 'dirAliases',
     'tabTitle', 'tabTitleEnabled', 'namingModel',
-    'localPort', 'agyBin', 'tmuxSession', 'kittySocket', 'nameWaitMs', 'idleCloseMs',
+    'localPort', 'agyBin', 'acpProcessPerSession', 'tmuxSession', 'kittySocket', 'nameWaitMs', 'idleCloseMs',
     'agyDataDir', 'inboxDir', 'wsUrl',
   ]);
   let addedCustomHeader = false;
@@ -452,6 +458,7 @@ export function loadConfig() {
     ...DEFAULTS,
     ...user,
     agyBin: (typeof user.agyBin === 'string' && user.agyBin.trim()) ? user.agyBin.trim() : DEFAULTS.agyBin,
+    acpProcessPerSession: typeof user.acpProcessPerSession === 'boolean' ? user.acpProcessPerSession : DEFAULTS.acpProcessPerSession,
     agyDataDir: (typeof user.agyDataDir === 'string' && user.agyDataDir.trim()) ? user.agyDataDir.trim() : DEFAULTS.agyDataDir,
     aliases: rawAliases,
     dirAliases: rawAliases,
