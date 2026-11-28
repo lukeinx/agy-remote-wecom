@@ -363,6 +363,15 @@ export async function setTabTitle(loc = {}, title = "", { oscOnly = false } = {}
   } catch {}
 }
 
+export function isAutomationPermissionError(err) {
+  const msg = String(err?.message || err || "");
+  return /-1743\b|errAEEventNotPermitted|not authorized to send apple events|not permitted to send apple events|不允许发送\s*apple\s*事件|apple\s*事件.*权限/i.test(msg);
+}
+
+export function terminalNeedsAutomation(name = "auto") {
+  return ["auto", "ghostty", "iterm", "terminal"].includes(String(name || "auto").trim().toLowerCase());
+}
+
 // CLI 自检：`node terminals.mjs` 列出探测结果；`node terminals.mjs open <name> <dir>` 实际开一个
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [, , sub, name, dir] = process.argv;

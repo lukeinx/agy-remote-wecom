@@ -142,7 +142,9 @@ test('PreInvocation hook intercepts /remote and SessionStart shows one-time onbo
       encoding: 'utf8',
     }),
   );
-  assert.match(firstStart.injectSteps?.[0]?.systemMessage?.metadata?.user_markdown || '', /尚未配置机器人/);
+  const firstOnboardMd = firstStart.injectSteps?.[0]?.systemMessage?.metadata?.user_markdown || '';
+  assert.match(firstOnboardMd, /尚未配置机器人/);
+  assert.match(firstOnboardMd, /agy-remote/);
 
   // 2. Second SessionStart does not repeat the onboarding card
   const secondStart = JSON.parse(
@@ -173,7 +175,9 @@ test('PreInvocation hook intercepts /remote and SessionStart shows one-time onbo
     );
     assert.equal(out.terminationBehavior, 'terminate');
     assert.equal(out.injectSteps?.[0]?.systemMessage?.systemMessage, '');
-    assert.ok(out.injectSteps?.[0]?.systemMessage?.metadata?.user_markdown?.length > 10);
+    const slashMd = out.injectSteps?.[0]?.systemMessage?.metadata?.user_markdown || '';
+    assert.ok(slashMd.length > 10);
+    assert.match(slashMd, /agy-remote/);
   }
 
   // 非首轮调用（invocationNum >= 1）不再重复执行 /remote

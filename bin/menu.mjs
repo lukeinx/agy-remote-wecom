@@ -65,6 +65,7 @@ export async function runInteractiveMenu(deps = {}) {
     stopService,
     openConfigInEditor,
     watchBindingInTerminal,
+    initialAction = '',
     cwd = process.cwd(),
     stdout = process.stdout,
   } = deps;
@@ -72,6 +73,7 @@ export async function runInteractiveMenu(deps = {}) {
   ensureDefaultConfigFile();
   let notice = null;
   let autoSetupTriggered = false;
+  let initialActionHandled = false;
 
   const setNotice = (text, tone = 'ok') => { notice = text ? {text, tone} : null; };
 
@@ -83,7 +85,7 @@ export async function runInteractiveMenu(deps = {}) {
     }
     const cfg = loadConfig();
     const botId = await tui.input({
-      title: '1/3 企微机器人 BotID（API 模式 → 长连接）',
+      title: '1/3 企微机器人 BotID（企微工作台 → 智能机器人 → API 模式 → 长连接）',
       defaultValue: cfg.botId || '',
       placeholder: '输入 BotID',
       validate: (v) => (v ? '' : 'BotID 不能为空'),
@@ -139,9 +141,20 @@ export async function runInteractiveMenu(deps = {}) {
         stdout.write(`${formatPluginStatus(res.plugin)}\n`);
         stdout.write(`\n👉 请在手机企业微信单聊该机器人，发送 6 位绑定码：${res.code}（10 分钟内有效）\n\n`);
         const watch = await watchBindingInTerminal({initiallyConnected: Boolean(res.state?.wecom?.connected)});
-        if (watch?.status === 'bound') setNotice(`✔ 配置并绑定成功（${watch.owner}）`);
-        else if (watch?.status === 'error') setNotice(`❌ ${watch.error || '企微连接失败'}`, 'error');
-        else setNotice(`⚠️ 绑定未完成（${watch?.status || '已退出'}），可稍后选择「重新绑定」`, 'warn');
+        if (watch?.status === 'bound') {
+          const nextCfg = loadConfig();
+          const aliasKeys = Object.keys(loadAliases());
+          const needsProjectSetup = tildeDir(nextCfg.defaultDir || '~') === '~' && (aliasKeys.length === 0 || (aliasKeys.length === 1 && aliasKeys[0] === 'home'));
+          setNotice(
+            needsProjectSetup
+              ? `✔ 配置并绑定成功（${watch.owner}）· 可在下方顺手添加项目目录别名与默认目录，或按 q 退出`
+              : `✔ 配置并绑定成功（${watch.owner}）`,
+          );
+        } else if (watch?.status === 'error') {
+          setNotice(`❌ ${watch.error || '企微连接失败'}`, 'error');
+        } else {
+          setNotice(`⚠️ 绑定未完成（${watch?.status || '已退出'}），可稍后选择「重新绑定」`, 'warn');
+        }
         return true;
       }
       setNotice(`✔ 配置已保存并重启服务（${formatWeComStatus(res.state?.wecom)}）`);
@@ -374,7 +387,12 @@ export async function runInteractiveMenu(deps = {}) {
       } else if (picked === 'defaultDir') {
         const aliases = loadAliases();
         const curDir = tildeDir(cfg.defaultDir || '~');
+        const cwdShort = tildeDir(cwd);
+        const aliasDirs = new Set(Object.values(aliases).map((d) => tildeDir(d)));
         const items = [
+          ...(cwdShort !== '~' && !aliasDirs.has(cwdShort) && fs.existsSync(cwd)
+            ? [{value: cwdShort, label: `当前目录 · ${cwdShort}`, current: cwdShort === curDir}]
+            : []),
           ...Object.entries(aliases).map(([k, d]) => ({
             value: tildeDir(d),
             label: `${k} · ${tildeDir(d)}`,
@@ -491,6 +509,13 @@ export async function runInteractiveMenu(deps = {}) {
   }
 
   while (true) {
+    if (initialAction === 'setup' && !initialActionHandled) {
+      initialActionHandled = true;
+      autoSetupTriggered = true;
+      const cont = await flowSetup();
+      if (!cont) return;
+      continue;
+    }
     const cfg = loadConfig();
     const configured = Boolean(cfg.botId && cfg.secret);
     if (!configured && !autoSetupTriggered) {
@@ -501,10 +526,16 @@ export async function runInteractiveMenu(deps = {}) {
     }
     const state = await health().catch(() => null);
     const aliases = loadAliases();
+    const aliasKeys = Object.keys(aliases);
+    const aliasDetail = aliasKeys.length === 0
+      ? '暂无（建议添加项目目录）'
+      : aliasKeys.length === 1 && aliasKeys[0] === 'home'
+        ? '仅默认 home（建议添加项目目录）'
+        : `${aliasKeys.length} 个`;
     const items = [
       {value: 'setup', label: '配置机器人', detail: configured ? maskId(cfg.botId) : '未配置'},
       {value: 'name', label: '会话命名', detail: namingStatusLabel(cfg)},
-      {value: 'alias', label: '目录别名', detail: `${Object.keys(aliases).length} 个`},
+      {value: 'alias', label: '目录别名', detail: aliasDetail},
       {value: 'prefs', label: '偏好设置', detail: `${cfg.terminal} · ${cfg.defaultMode} · ${cfg.remoteConfirm}`},
       {value: 'bind', label: '重新绑定', detail: cfg.ownerUserId ? cfg.ownerUserId : '待绑定'},
       {value: 'restart', label: state ? '重启服务' : '启动服务', detail: state ? '重新加载 daemon' : '启动后台守护进程'},

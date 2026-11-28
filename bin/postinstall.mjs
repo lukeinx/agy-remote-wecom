@@ -22,7 +22,7 @@ try {
     ? '~' + CONFIG_FILE.slice(os.homedir().length)
     : CONFIG_FILE;
   console.log('\n✔ Agy Remote WeCom 已安装并注册到 Antigravity (agy)！');
-  console.log('  1. 交互式配置（推荐）：运行 `agy-remote setup`');
+  console.log('  1. 交互式配置（推荐）：运行 `agy-remote`（或 `agy-remote setup`）');
   console.log(`  2. 或直接编辑配置表：  ${shortCfg}（填好后运行 \`agy-remote start\`）\n`);
 } catch {
   // 若本机尚未安装 agy CLI 或非交互环境，静默跳过，不阻断 npm install

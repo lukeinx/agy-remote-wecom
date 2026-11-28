@@ -167,7 +167,7 @@ if (
   const md = [
     '### 📱 Agy Remote WeCom 已安装（尚未配置机器人）',
     '',
-    '- **交互式初始化（推荐）**：在系统终端运行 `agy-remote setup`',
+    '- **交互式配置（推荐）**：在系统终端运行 `agy-remote`（或 `agy-remote setup`）',
     `- **或直接编辑配置表**：[\`${cfgPath}\`](file://${cfgPath})（或运行 \`agy-remote config edit\`），填入企微机器人 \`botId\` 与 \`secret\` 后执行 \`agy-remote start\``,
   ].join('\n');
   process.stdout.write(JSON.stringify({
@@ -187,8 +187,9 @@ if (payload.hookEventName === 'PreInvocation' && isFirstInvocation && isRemoteSl
   const md = [
     '### 📱 Agy Remote WeCom 配置表',
     '',
+    '- **交互式菜单**：在系统终端运行 `agy-remote`（配置机器人、目录别名、终端偏好、自动命名与启停）',
     `- **配置文件**：[\`config.json\`](file://${cfgPath})（运行 \`agy-remote config edit\` 打开；修改 \`aliases\`、\`tabTitle\`、\`defaultDir\`、\`defaultMode\`、\`remoteConfirm\` 保存即生效）`,
-    '- **终端命令**：`agy-remote status`（状态） · `agy-remote config`（查看配置） · `agy-remote setup`（初始化/绑定） · `agy-remote restart`（重启服务）',
+    '- **终端命令**：`agy-remote status`（状态） · `agy-remote alias`（目录别名） · `agy-remote config`（查看配置） · `agy-remote setup`（初始化/绑定） · `agy-remote restart`（重启服务）',
   ].join('\n');
   process.stdout.write(JSON.stringify({
     injectSteps: [{

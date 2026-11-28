@@ -24,10 +24,10 @@
 
 ```sh
 npm install -g agy-remote-wecom
-agy-remote setup
+agy-remote
 ```
 
-安装时 `postinstall` 会生成默认配置 `~/.config/agy-remote-wecom/config.json` 并向 `agy` 注册生命周期 Hook 插件；如需跳过自动步骤，可设 `AGY_REMOTE_SKIP_POSTINSTALL=1`（或 `npm install -g --ignore-scripts agy-remote-wecom`），之后运行 `agy-remote setup` 同样会完成全部初始化。
+安装时 `postinstall` 会生成默认配置 `~/.config/agy-remote-wecom/config.json` 并向 `agy` 注册生命周期 Hook 插件；如需跳过自动步骤，可设 `AGY_REMOTE_SKIP_POSTINSTALL=1`（或 `npm install -g --ignore-scripts agy-remote-wecom`），之后运行 `agy-remote` 或 `agy-remote setup` 同样会完成全部初始化。
 
 **源码安装**
 
@@ -35,10 +35,10 @@ agy-remote setup
 git clone https://github.com/lukeinx/agy-remote-wecom.git
 cd agy-remote-wecom
 npm ci --ignore-scripts
-./bin/remote.mjs setup
+./bin/remote.mjs
 ```
 
-`setup` 会引导填入 `BotID` 与 `Secret`（以 `0600` 权限写入本地配置）、安装 `agy` 插件、注册并启动 macOS `launchd` 服务，随后显示 6 位绑定码。在手机企微单聊机器人发送该绑定码即完成绑定，之后仅接受主人单聊消息。
+首次运行 `agy-remote`（或 `agy-remote setup`）会打开交互式 TUI 向导，引导填入 `BotID` 与 `Secret`（掩码输入，以 `0600` 权限写入本地配置）、安装 `agy` 插件、注册并启动 macOS `launchd` 服务，随后显示 6 位绑定码。在手机企微单聊机器人发送该绑定码即完成绑定，之后仅接受主人单聊消息；绑定后可在同一菜单内继续配置常用项目目录别名、默认终端与偏好。
 
 **会话自动命名**：新会话默认按首条输入生成短标题并同步到终端标签页（运行中 `⠋` / 完成 `·` / 失败 `×`）。未配置外部 API Key 时自动使用零延迟本地规则提取；如需 AI 中文短标题，可在 `config.json` 的 `tabTitle` 中填入任意 OpenAI 兼容接口地址与 `$环境变量` API Key（纯 HTTP 无状态请求，不创建临时 `agy` 会话）。
 
@@ -69,7 +69,7 @@ npm ci --ignore-scripts
 
 ## 电脑端配置与 CLI
 
-所有配置集中在 `~/.config/agy-remote-wecom/config.json`（JSONC 格式，支持 `//` 注释，保存即热生效；完整字段见 [config.example.json](config.example.json)）。在 `agy` 对话框输入 `/remote` 也可直接唤出配置文件路径与命令提示（0 Token）。
+所有配置集中在 `~/.config/agy-remote-wecom/config.json`（JSONC 格式，支持 `//` 注释，保存即热生效；完整字段见 [config.example.json](config.example.json)）。在 `agy` 对话框输入 `/remote` 也可直接唤出交互菜单提示、配置文件路径与常用终端命令（0 Token）。
 
 | 命令 | 作用 |
 |---|---|

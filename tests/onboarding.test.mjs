@@ -10,7 +10,9 @@ process.env.AGY_REMOTE_HOME = home;
 process.env.AGY_REMOTE_NO_LISTEN = '1';
 
 const {WeComTransport, BIND_CARD} = await import('../daemon/wecom.mjs');
-const {handleCommand, handleCardCallback, acp} = await import('../daemon/daemon.mjs');
+const {handleCommand, handleCardCallback, buildLsCard, acp} = await import('../daemon/daemon.mjs');
+const {ADAPTERS, isAutomationPermissionError, terminalNeedsAutomation} = await import('../daemon/terminals.mjs');
+const {CONFIG_FILE} = await import('../daemon/config.mjs');
 const {
   tryInstallPlugin,
   formatPluginStatus,
@@ -308,6 +310,108 @@ test('performStart generates bind code for unbound config and formatStartOutput 
   assert.match(out, /🟢 企微已连接/);
   assert.match(out, /Hook 插件未自动安装/);
   assert.match(out, /654321/);
+});
+
+test('isAutomationPermissionError and terminalNeedsAutomation cover macOS Apple Events cases', () => {
+  assert.equal(isAutomationPermissionError(new Error('execution error: Not authorized to send Apple events to Ghostty. (-1743)')), true);
+  assert.equal(isAutomationPermissionError(new Error('errAEEventNotPermitted')), true);
+  assert.equal(isAutomationPermissionError(new Error('不允许发送 Apple 事件给 Ghostty。')), true);
+  assert.equal(isAutomationPermissionError(new Error('Ghostty window closed')), false);
+
+  assert.equal(terminalNeedsAutomation('auto'), true);
+  assert.equal(terminalNeedsAutomation('ghostty'), true);
+  assert.equal(terminalNeedsAutomation('iterm'), true);
+  assert.equal(terminalNeedsAutomation('terminal'), true);
+  assert.equal(terminalNeedsAutomation('tmux'), false);
+  assert.equal(terminalNeedsAutomation('none'), false);
+});
+
+test('watchBindingInTerminal prints macOS automation tip only when needed', async () => {
+  const bindFile = path.join(home, 'bind-auto-tip.json');
+  fs.writeFileSync(bindFile, JSON.stringify({code: '123456', expiresAt: Date.now() + 60_000}));
+
+  const macLines = [];
+  await watchBindingInTerminal({
+    isTTY: true,
+    bindFile,
+    platform: 'darwin',
+    healthFn: async () => ({wecom: {connected: true, bound: true}}),
+    loadConfigFn: () => ({ownerUserId: 'U_MAC', terminal: 'auto'}),
+    write: (s) => macLines.push(s),
+    logLine: (s) => macLines.push(s),
+    sleep: async () => {},
+  });
+  assert.match(macLines.join('\n'), /自动化/);
+
+  const tmuxLines = [];
+  await watchBindingInTerminal({
+    isTTY: true,
+    bindFile,
+    platform: 'darwin',
+    healthFn: async () => ({wecom: {connected: true, bound: true}}),
+    loadConfigFn: () => ({ownerUserId: 'U_TMUX', terminal: 'tmux'}),
+    write: (s) => tmuxLines.push(s),
+    logLine: (s) => tmuxLines.push(s),
+    sleep: async () => {},
+  });
+  assert.doesNotMatch(tmuxLines.join('\n'), /自动化/);
+});
+
+test('newTerminalSession falls back to background session on macOS automation denial and buildLsCard clarifies empty state', async () => {
+  const emptyLs = buildLsCard([]);
+  assert.match(emptyLs, /安装前已打开的 agy 终端需重启或新开/);
+
+  const origStart = acp.start;
+  const origCall = acp.call;
+  const origGhostty = {...ADAPTERS.ghostty};
+  const hadConfig = fs.existsSync(CONFIG_FILE);
+  const origConfigRaw = hadConfig ? fs.readFileSync(CONFIG_FILE, 'utf8') : '';
+  const prompts = [];
+  let seq = 0;
+
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify({terminal: 'ghostty', tabTitleEnabled: false}));
+    acp.start = async () => ({});
+    acp.call = async (method, params) => {
+      if (method === 'session/new') return {sessionId: `acp-auto-${++seq}`, configOptions: []};
+      if (method === 'session/close') return {};
+      if (method === 'session/prompt') {
+        prompts.push(params);
+        return {stopReason: 'end_turn'};
+      }
+      if (method === 'session/list') return {sessions: []};
+      throw new Error(`unexpected ACP call: ${method}`);
+    };
+
+    ADAPTERS.ghostty.gui = false;
+    ADAPTERS.ghostty.open = async () => {
+      throw new Error('execution error: Not authorized to send Apple events to Ghostty. (-1743)');
+    };
+
+    const ack = {media: false};
+    const media = [{local: '/tmp/auto.png', name: 'auto.png', kind: 'image'}];
+    const fallbackCard = await handleCommand(`n ${home} 检查权限降级`, media, ack);
+    assert.equal(ack.media, true);
+    assert.equal(fallbackCard.card?.main_title?.title, '✏️ 创建会话');
+    assert.equal(fallbackCard.card?.horizontal_content_list?.find((x) => x.keyname === '类型')?.value, '后台会话');
+    assert.match(fallbackCard.card?.quote_area?.quote_text || fallbackCard.fallback || '', /自动化权限未授权/);
+    assert.equal(prompts.length, 1);
+
+    // Non-permission error still returns failure message without fallback
+    ADAPTERS.ghostty.open = async () => {
+      throw new Error('Ghostty crashed unexpectedly');
+    };
+    const failMsg = await handleCommand(`n ${home} 不会降级`);
+    assert.match(failMsg, /新建失败/);
+    assert.match(failMsg, /Ghostty crashed unexpectedly/);
+  } finally {
+    ADAPTERS.ghostty.gui = origGhostty.gui;
+    ADAPTERS.ghostty.open = origGhostty.open;
+    acp.start = origStart;
+    acp.call = origCall;
+    if (hadConfig) fs.writeFileSync(CONFIG_FILE, origConfigRaw);
+    else fs.rmSync(CONFIG_FILE, {force: true});
+  }
 });
 
 test.after(() => fs.rmSync(home, {recursive: true, force: true}));

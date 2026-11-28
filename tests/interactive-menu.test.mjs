@@ -183,6 +183,54 @@ test('runInteractiveMenu updates preferences, aliases, naming and preserves JSON
   assert.ok(calls.some((c) => c.notice?.text?.includes('默认终端已设为 ghostty')));
 });
 
+test('runInteractiveMenu with initialAction=setup forces wizard when configured, highlights home-only alias and cwd defaultDir', async () => {
+  // Reset aliases back to only default home, and keep defaultDir as '~'
+  saveConfig({...loadConfig(), botId: 'bot-existing', secret: 'sec-existing', ownerUserId: 'U_EXIST', defaultDir: '~', aliases: {home: '~'}});
+  const setupCalls = [];
+  const projectCwd = path.join(home, 'my-new-project');
+  fs.mkdirSync(projectCwd, {recursive: true});
+
+  const {tui, calls} = makeScriptedTui([
+    // Forced setup flow even though botId/secret exist
+    'bot-existing',
+    'sec-existing',
+    'code',
+    // Main menu -> Preferences -> defaultDir -> pick top "当前目录 · ..." -> back -> exit
+    'prefs',
+    'defaultDir',
+    `~${projectCwd.slice(os.homedir().length)}`.startsWith('~~') ? projectCwd : projectCwd,
+    null,
+    'exit',
+  ]);
+  // Note: projectCwd is inside os.tmpdir() (not under os.homedir()), so tildeDir(projectCwd) === projectCwd
+  assert.equal(calls.length, 0);
+
+  await runInteractiveMenu({
+    tui,
+    initialAction: 'setup',
+    cwd: projectCwd,
+    health: async () => ({version: '0.3.0', wecom: {connected: true}, targets: []}),
+    formatWeComStatus: () => '🟢 企微已连接',
+    formatPluginStatus: () => '✔ Hook 插件已安装',
+    performQuickSetup: async (botId, secret, ownerArg, opts) => {
+      setupCalls.push({botId, secret, ownerArg, opts});
+      return {code: '112233', state: {wecom: {connected: true}}, plugin: {ok: true}};
+    },
+    watchBindingInTerminal: async () => ({status: 'bound', owner: 'U_EXIST'}),
+    stdout: {write() {}},
+  });
+
+  assert.equal(setupCalls.length, 1);
+  const mainMenuCall = calls.find((c) => c.title === '📱 Agy Remote');
+  assert.ok(mainMenuCall, 'should render main menu after forced setup');
+  assert.match(mainMenuCall.notice?.text || '', /顺手添加项目目录别名/);
+  // Verify defaultDir select had cwd placed first before 'home' alias
+  const dirCall = calls.find((c) => c.title === '选择默认新建目录');
+  assert.ok(dirCall, 'should prompt defaultDir selection');
+  assert.equal(dirCall.items[0], projectCwd);
+  assert.equal(loadConfig().defaultDir, projectCwd);
+});
+
 test('CLI falls back to status markdown when non-TTY and rejects explicit menu outside TTY', () => {
   const cli = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../bin/remote.mjs');
   const statusOut = execFileSync(process.execPath, [cli], {

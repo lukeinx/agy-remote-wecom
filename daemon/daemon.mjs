@@ -16,7 +16,7 @@ import {RUN_DIR, CONFIG_FILE, loadConfig, saveOwner, ensureToken, updateConfigFi
 import {loadAliases, expandDir, tildeDir} from './aliases.mjs';
 import {WeComTransport, notifyDesktop} from './wecom.mjs';
 import {AcpClient, configOf} from './acp.mjs';
-import {resolveTerminal, screenLocked, injectKind, injectText, injectEscape, setTabTitle} from './terminals.mjs';
+import {resolveTerminal, screenLocked, injectKind, injectText, injectEscape, setTabTitle, isAutomationPermissionError} from './terminals.mjs';
 import {
   fetchCliModels,
   modelMatchesCurrent,
@@ -1566,8 +1566,8 @@ export function buildLsCard(live) {
   if (!live.length) {
     return plainText({
       head: '💬 活跃会话 · 0 个',
-      body: '现在没有打开的会话。直接发消息即可新建，也可以先建空白会话或从历史里找。',
-      foot: '发送 `创建会话` 新建，或 `历史会话` 找回（已有 agy 终端需重启才会出现）',
+      body: '现在没有已接入的活跃会话。直接发消息即可新建，也可以先建空白会话或从历史里找。\n（安装前已打开的 agy 终端需重启或新开才会出现）',
+      foot: '发送 `创建会话` 新建，或 `历史会话` 找回',
     });
   }
   const options = live.slice(0, VOTE_OPT_MAX).map((t) => selOpt(t));
@@ -2025,7 +2025,7 @@ function buildDirCard(arg = '') {
       head: '📁 当前目录',
       subject: tildeDir(cur),
       body: '还没有配置目录别名。',
-      foot: '在电脑执行 `agy-remote alias` 添加 · 或发送 `目录 ~/路径`',
+      foot: '在电脑运行 `agy-remote` 或 `agy-remote alias` 添加 · 或发送 `目录 ~/路径`',
     });
   }
   const cardOpts = rows.map(([n, d]) => ({
@@ -2314,6 +2314,18 @@ async function newTerminalSession(cwd, msg, media, ack) {
     await term.open({cwd, nonce, agyCmd, kittySocket: cfg.kittySocket, tmuxSession: cfg.tmuxSession || 'agy'});
   } catch (e) {
     cancelWait();
+    if (isAutomationPermissionError(e)) {
+      targets.delete(t.sessionId);
+      saveAcpSessions();
+      writeAcpState();
+      return newBackgroundSession(
+        cwd,
+        msg,
+        media,
+        ack,
+        `${term.label} 自动化权限未授权，已改用后台新建（请在电脑「系统设置 › 隐私与安全性 › 自动化」允许）`,
+      );
+    }
     return plainText({head: '⚠️ 新建失败', subject: term.label, body: e.message, foot: `${term.hint} · 发送 \`创建后台会话\` 改用后台`});
   }
   const claimed = await claimedPromise;

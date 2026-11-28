@@ -25,6 +25,7 @@ import {loadAliases, saveAliases, tildeDir, missingDirs, expandDir, checkName} f
 import {health, startService, stopService, restartService, uninstallService} from '../daemon/service.mjs';
 import {writeNamingPref, namingStatusLabel, resolveApiKey} from '../daemon/naming.mjs';
 import {fetchCliUsage, formatUsageBody, formatUsageClock} from '../daemon/usage.mjs';
+import {terminalNeedsAutomation} from '../daemon/terminals.mjs';
 import {runInteractiveMenu} from './menu.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -188,6 +189,7 @@ export async function watchBindingInTerminal(deadlineOrOpts = Date.now() + BIND_
     write = (s) => process.stdout.write(s),
     logLine = (s) => console.log(s),
     initiallyConnected = false,
+    platform = process.platform,
     sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   } = opts;
   if (!isTTY) return {status: 'non-tty'};
@@ -220,8 +222,12 @@ export async function watchBindingInTerminal(deadlineOrOpts = Date.now() + BIND_
       logLine(`\n⚠️ 企微暂未连上（${state.wecom.lastError}），仍在重试...`);
     }
     if (state.wecom?.bound) {
-      const owner = loadConfigFn().ownerUserId || '已绑定';
-      logLine(`\n\n🎉 企微绑定成功（主人账号：${owner}）！现在可以直接在手机企微发消息遥控 agy 了。\n   提示：此前已打开的 agy 终端需重启或新开，才能在「活跃会话」中看到。\n`);
+      const cfg = loadConfigFn();
+      const owner = cfg.ownerUserId || '已绑定';
+      const autoTip = platform === 'darwin' && terminalNeedsAutomation(cfg.terminal)
+        ? '\n   提示：首次在手机新建终端会话若弹出 macOS「自动化」授权，请点允许（未授权将自动改用后台会话）。'
+        : '';
+      logLine(`\n\n🎉 企微绑定成功（主人账号：${owner}）！现在可以直接在手机企微发消息遥控 agy 了。\n   提示：此前已打开的 agy 终端需重启或新开，才能在「活跃会话」中看到。${autoTip}\n`);
       return {status: 'bound', owner};
     }
     if (!fs.existsSync(bindFile)) {
@@ -388,7 +394,7 @@ async function formatStatusMarkdown() {
       '',
       '用手机企业微信遥控本机 `agy`。任选一种方式完成初始化：',
       '',
-      '1. **交互式向导（推荐）**：在终端执行 `agy-remote setup`',
+      '1. **交互式配置（推荐）**：在终端执行 `agy-remote`（或 `agy-remote setup`）',
       `2. **直接编辑配置表**：运行 \`agy-remote config edit\` 打开 [\`${CONFIG_FILE}\`](file://${CONFIG_FILE})，填入 \`botId\` 与 \`secret\` 后执行 \`agy-remote start\``,
     ].join('\n');
   }
@@ -655,6 +661,19 @@ if (isMainModule()) {
         const md = await runSlashCommand(`setup ${arg1} ${arg2} ${arg3}`.trim());
         console.log(md);
         if (md.includes('企微连接失败')) process.exitCode = 1;
+      } else if (isInteractiveTty) {
+        await runInteractiveMenu({
+          health,
+          formatWeComStatus,
+          formatPluginStatus,
+          performQuickSetup,
+          performBind,
+          performStart,
+          stopService,
+          openConfigInEditor,
+          watchBindingInTerminal,
+          initialAction: 'setup',
+        });
       } else {
         await interactiveSetup();
       }
@@ -713,7 +732,7 @@ if (isMainModule()) {
         '',
         '  （无参数）             打开终端交互式配置菜单（配置/命名/别名/偏好/绑定/启停）',
         `  config [edit|path]     查看或打开单一配置表 (${CONFIG_FILE})`,
-        '  setup [BotID Secret]   配置 BotID / Secret、安装 Hook 插件并等待绑定完成',
+        '  setup [BotID Secret]   进入机器人配置向导（支持传 BotID Secret），安装 Hook 插件并等待绑定完成',
         '  bind                   重新生成 6 位企微绑定码并等待绑定完成',
         '  status | doctor        查看服务健康状态与活跃会话',
         '  usage | quota          按模型分组查看当前剩余额度与重置时间',
