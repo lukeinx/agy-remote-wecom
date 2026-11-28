@@ -25,6 +25,7 @@ import {loadAliases, saveAliases, tildeDir, missingDirs, expandDir, checkName} f
 import {health, startService, stopService, restartService, uninstallService} from '../daemon/service.mjs';
 import {writeNamingPref, namingStatusLabel, resolveApiKey} from '../daemon/naming.mjs';
 import {fetchCliUsage, formatUsageBody, formatUsageClock} from '../daemon/usage.mjs';
+import {runInteractiveMenu} from './menu.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PLUGIN_DIR = path.join(ROOT, 'plugin');
@@ -245,14 +246,14 @@ async function performBind() {
   return {code, state};
 }
 
-async function performQuickSetup(botId, secret, ownerArg = '') {
+async function performQuickSetup(botId, secret, ownerArg = '', {forceUnbind = false} = {}) {
   const running = await health();
   if (running?.targets?.some((t) => t.busy)) {
     throw new Error('请先等正在运行的遥控任务结束，再修改配置。');
   }
   const cfg = loadConfig();
   const changedBot = botId !== cfg.botId;
-  const ownerUserId = ownerArg || (changedBot ? '' : cfg.ownerUserId);
+  const ownerUserId = forceUnbind ? '' : (ownerArg || (changedBot ? '' : cfg.ownerUserId));
   const next = {...cfg, botId: botId.trim(), secret: secret.trim(), ownerUserId};
   try { fs.rmSync(path.join(RUN_DIR, WELCOME_FILE), {force: true}); } catch {}
   saveConfig(next);
@@ -619,13 +620,30 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
-  const command = process.argv[2] || 'status';
+  const rawCommand = process.argv[2] || '';
+  const isInteractiveTty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const command = rawCommand || (isInteractiveTty ? 'menu' : 'status');
   const arg1 = process.argv[3] || '';
   const arg2 = process.argv[4] || '';
   const arg3 = process.argv[5] || '';
 
   try {
-    if (command === '__slash') {
+    if (command === 'menu' || command === 'ui') {
+      if (!isInteractiveTty) {
+        throw new Error('交互式配置菜单需要在终端 TTY 中运行；非交互环境请使用 `agy-remote status` / `agy-remote config`。');
+      }
+      await runInteractiveMenu({
+        health,
+        formatWeComStatus,
+        formatPluginStatus,
+        performQuickSetup,
+        performBind,
+        performStart,
+        stopService,
+        openConfigInEditor,
+        watchBindingInTerminal,
+      });
+    } else if (command === '__slash') {
       const md = await runSlashCommand(process.env.AGY_SLASH_ARGS || '');
       console.log(md);
     } else if (command === 'run') {
@@ -691,8 +709,9 @@ if (isMainModule()) {
       console.log(await runSlashCommand('usage'));
     } else {
       console.log([
-        '用法：agy-remote <命令>',
+        '用法：agy-remote [命令]',
         '',
+        '  （无参数）             打开终端交互式配置菜单（配置/命名/别名/偏好/绑定/启停）',
         `  config [edit|path]     查看或打开单一配置表 (${CONFIG_FILE})`,
         '  setup [BotID Secret]   配置 BotID / Secret、安装 Hook 插件并等待绑定完成',
         '  bind                   重新生成 6 位企微绑定码并等待绑定完成',

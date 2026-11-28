@@ -1,4 +1,5 @@
 import {execFile} from 'node:child_process';
+import {formatModelLabel, isOrchestratorModel} from './models.mjs';
 
 const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const MODELS_PREFIX_RE = /^Models within this group:\s*(.+)$/i;
@@ -195,7 +196,7 @@ export function formatResetLabel(bucket = {}, now = Date.now()) {
 const MODEL_EFFORT_SUFFIX_RE = /(?:\s*\((?:low|medium|high|xhigh|max)\)|-(?:low|medium|high|xhigh|max))$/i;
 
 function normalizeModelTokens(value = '') {
-  return String(value || '')
+  return formatModelLabel(value)
     .trim()
     .replace(MODEL_EFFORT_SUFFIX_RE, '')
     .toLowerCase()
@@ -211,6 +212,11 @@ export function groupMatchesModel(group = {}, currentModel = '') {
     const norm = normalizeModelTokens(name);
     return Boolean(norm) && (cur === norm || cur.startsWith(`${norm} `) || norm.startsWith(`${cur} `));
   });
+}
+
+function groupHasOrchestratorFallback(group = {}) {
+  if ((group.models || []).some((m) => isOrchestratorModel(m))) return true;
+  return (group.buckets || []).some((b) => /^gemini-(?:5h|weekly)$/i.test(String(b?.id || '')));
 }
 
 export function formatGroupModels(models = []) {
@@ -251,9 +257,14 @@ export function formatGroupModels(models = []) {
 const escapeCell = (s) => String(s || '').replace(/\|/g, '\\|');
 
 export function formatUsageBody(groups = [], {now = Date.now(), currentModel = ''} = {}) {
+  const matched = groups.map((group) => groupMatchesModel(group, currentModel));
+  if (!matched.some(Boolean) && isOrchestratorModel(currentModel)) {
+    const fallbackIdx = groups.findIndex((group) => groupHasOrchestratorFallback(group));
+    if (fallbackIdx >= 0) matched[fallbackIdx] = true;
+  }
   return groups
-    .map((group) => {
-      const tag = groupMatchesModel(group, currentModel) ? ' `当前`' : '';
+    .map((group, idx) => {
+      const tag = matched[idx] ? ' `当前`' : '';
       const lines = [
         `**${group.name}**${tag}`,
         '',

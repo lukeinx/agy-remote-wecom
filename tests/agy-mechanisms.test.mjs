@@ -229,9 +229,10 @@ test('steer command injects userMessage in PreInvocation and falls back to Stop 
   assert.match(steerAck, /已加入插话/);
   assert.match(steerAck, /待注入 1 条/);
 
-  // Status shows pending steer count
+  // Status shows pending steer count and progressively discloses steer command
   const st = await handleCommand('status');
   assert.match(st, /待注入插话 1 条/);
+  assert.match(st, /发送 `插话 内容` 纠偏，或 `停止` 停止/);
 
   // Next PreInvocation drains steers into injectSteps
   const injected = await handleHookEvent({hookEventName: 'PreInvocation', conversationId: sid, cwd: home, pid: process.pid, transcriptPath: tp, invocationNum: 1});
@@ -260,9 +261,10 @@ test('Stop with fullyIdle=false reports background-running status and defers que
   await handleCardCallback({taskId: lsCard.card.task_id, optionId: opt.id});
 
   await handleHookEvent({hookEventName: 'PreInvocation', conversationId: sid, cwd: home, pid: process.pid, transcriptPath: tp});
-  // Queue a follow-up message while running
+  // Queue a follow-up message while running (discloses mid-turn steer for live TUI)
   const queuedReply = await handleCommand('汇总成表格');
   assert.match(queuedReply, /已排队/);
+  assert.match(queuedReply, /发送 `插话 内容` 可直接纠偏/);
   popSent();
 
   // First Stop has fullyIdle: false -> should NOT drain queue, should push bg-running notice

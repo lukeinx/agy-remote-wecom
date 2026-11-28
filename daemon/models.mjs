@@ -36,11 +36,62 @@ export function inferModelContextWindow(modelStr = '') {
   return 0;
 }
 
-export function modelMatchesCurrent(currentModel = '', optionValue = '') {
+const ORCHESTRATOR_LABELS = {
+  'gemini-pro-orchestrator': 'Orchestrator (Carbon)',
+  'gemini-pro-orchestrator-carbon': 'Orchestrator (Carbon)',
+  'gemini-pro-orchestrator-neon': 'Orchestrator (Neon)',
+  'gemini-pro-orchestrator-argon': 'Orchestrator (Argon)',
+  'gemini-pro-orchestrator-g1-pro': 'Orchestrator (Argon)',
+};
+
+export function isOrchestratorModel(modelStr = '') {
+  const s = String(modelStr || '').trim().toLowerCase();
+  return /^gemini-pro-orchestrator(?:$|-)|^orchestrator(?:\b|\s*\()/i.test(s);
+}
+
+export function formatModelLabel(modelStr = '', {configOptions = null, catalog = null} = {}) {
+  const s = String(modelStr || '').trim();
+  if (!s) return '';
+  const low = s.toLowerCase();
+  if (!/^gemini-pro-orchestrator(?:$|-)/.test(low)) return s;
+
+  if (Array.isArray(configOptions)) {
+    const modelOpt = configOptions.find((o) => o?.id === 'model');
+    const hit = (modelOpt?.options || []).find((o) => String(o?.value || '').trim().toLowerCase() === low);
+    if (hit?.name) return String(hit.name).trim();
+  }
+  if (Array.isArray(catalog?.models)) {
+    for (const item of catalog.models) {
+      if (String(item?.value || '').trim().toLowerCase() === low && item?.name) return String(item.name).trim();
+      for (const v of item?.variants || []) {
+        if (String(v?.value || '').trim().toLowerCase() === low && v?.name) return String(v.name).trim();
+      }
+    }
+  }
+  const base = stripEffortSuffix(low);
+  if (ORCHESTRATOR_LABELS[low]) return ORCHESTRATOR_LABELS[low];
+  if (ORCHESTRATOR_LABELS[base]) return ORCHESTRATOR_LABELS[base];
+  const m = /^gemini-pro-orchestrator-([a-z0-9._-]+)$/.exec(base);
+  if (m) {
+    const variant = m[1]
+      .split(/[-_]+/)
+      .filter(Boolean)
+      .map((part) => part[0].toUpperCase() + part.slice(1))
+      .join(' ');
+    if (variant) return `Orchestrator (${variant})`;
+  }
+  return 'Orchestrator';
+}
+
+export function modelMatchesCurrent(currentModel = '', optionValue = '', optionName = '') {
   const cur = String(currentModel || '').trim().toLowerCase();
   const val = String(optionValue || '').trim().toLowerCase();
   if (!cur || !val) return false;
-  return cur === val || cur.startsWith(`${val}-`);
+  if (cur === val) return true;
+  if (stripEffortSuffix(cur) === val) return true;
+  const name = String(optionName || '').trim().toLowerCase();
+  if (name && cur === name) return true;
+  return false;
 }
 
 export function parseAgyModelsOutput(raw = '') {

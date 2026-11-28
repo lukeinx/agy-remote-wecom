@@ -174,9 +174,10 @@ test('background-to-terminal handoff blocks concurrent writes, then releases the
   const blocked = await handleHookEvent({conversationId: id, hookEventName: 'PreInvocation', cwd: home, pid: process.pid});
   assert.equal(blocked.terminationBehavior, 'terminate');
   assert.match(blocked.injectSteps[0].systemMessage.metadata.user_markdown, /仍在后台执行/);
+  const before = calls.length;
   prompt.resolve({stopReason: 'end_turn'});
   await reply;
-  const before = calls.length;
+  await tick();
   await handleHookEvent({conversationId: id, hookEventName: 'SessionStart', cwd: home, pid: process.pid});
   assert.ok(calls.slice(before).some((c) => c.method === 'session/close' && c.params.sessionId === id));
   assert.match(await handleCommand('model'), /请在当前终端切换/);

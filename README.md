@@ -63,7 +63,7 @@ npm ci --ignore-scripts
 | `remote` / `mute` | `关注` / `取关` | 开启全部终端任务完成推送 / 静音电脑端发起的任务推送 |
 | `steer` | `插话 <内容>` / `纠偏 <内容>` | 终端任务运行中插入纠偏指令，无需中断重来 |
 | `usage` / `quota` | `用量` / `额度` | 按模型分组查看剩余额度与重置时间（`用量 刷新` 强制刷新） |
-| `status` / `stop` / `restart` / `help` | `状态` / `停止` / `重启 [force]` / `帮助` | 查看状态与上下文占用、中断任务、重启服务、查看全部命令 |
+| `status` / `stop` / `restart` / `help` / `help all` | `状态` / `停止` / `重启 [force]` / `帮助` / `更多帮助` | 查看状态与上下文占用、中断任务、重启服务、查看常用与更多命令 |
 
 中文命令与参数间需保留空格：`模型 high` 是命令，`模型high` 会作为普通消息发出。
 
@@ -73,6 +73,7 @@ npm ci --ignore-scripts
 
 | 命令 | 作用 |
 |---|---|
+| `agy-remote` | 打开终端交互式配置菜单（机器人、会话命名、目录别名、偏好、绑定与启停） |
 | `agy-remote setup` | 交互式配置凭证、安装插件、启动服务并等待绑定 |
 | `agy-remote config` / `agy-remote edit` | 查看生效配置 / 用系统编辑器打开 `config.json` 并自动校验 |
 | `agy-remote status` / `agy-remote usage` | 查看守护进程与活跃会话状态 / 查询模型剩余额度 |

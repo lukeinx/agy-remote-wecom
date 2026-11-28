@@ -16,7 +16,7 @@ import {RUN_DIR, CONFIG_FILE, loadConfig, saveOwner, ensureToken, updateConfigFi
 import {loadAliases, expandDir, tildeDir} from './aliases.mjs';
 import {WeComTransport, notifyDesktop} from './wecom.mjs';
 import {AcpClient, configOf} from './acp.mjs';
-import {resolveTerminal, screenLocked, injectKind, injectText, injectEscape} from './terminals.mjs';
+import {resolveTerminal, screenLocked, injectKind, injectText, injectEscape, setTabTitle} from './terminals.mjs';
 import {
   fetchCliModels,
   modelMatchesCurrent,
@@ -25,6 +25,7 @@ import {
   inferModelContextWindow,
   findModelEntry,
   resolveVariantByDisplayName,
+  formatModelLabel,
 } from './models.mjs';
 import {fetchCliUsage, formatUsageBody, formatUsageClock} from './usage.mjs';
 import {processContext} from '../plugin/context.mjs';
@@ -45,6 +46,15 @@ const TOKEN = ensureToken();
 const LOG_FILE = path.join(RUN_DIR, 'daemon.log');
 const STATE_FILE = path.join(RUN_DIR, 'state.json');
 const PICKS_FILE = path.join(RUN_DIR, 'picks.json');
+export const ACP_STATE_FILE = path.join(RUN_DIR, 'acp-state.json');
+const HANDOFF_NOTICE_TTL_MS = 15 * 60_000;
+
+let desktopNotifier = (title, body) => {
+  if (process.env.AGY_REMOTE_NO_LISTEN !== '1') notifyDesktop(title, body);
+};
+export function setDesktopNotifier(fn) {
+  desktopNotifier = typeof fn === 'function' ? fn : () => {};
+}
 const HIST_LIST = 15;
 const VOTE_OPT_MAX = 20;
 const CARD_TTL_MS = 30 * 60000;
@@ -384,6 +394,9 @@ function makeTarget(sessionId, kind, init = {}) {
     queue: [],
     steers: [],
     lastArtCount: 0,
+    pendingHandoff: null,
+    handoffCompleted: null,
+    _lastHandoffTabTitle: '',
     label() {
       return stripCtrl(this.customName || this.name || this.firstInput || '') || (this.kind === 'history' ? '会话' : `新会话 · ${tildeDir(this.cwd)}`);
     },
@@ -472,9 +485,11 @@ function getOrCreateTarget(sessionId, kind, init = {}) {
     if (init.customName) t.customName = init.customName;
     if (init.firstInput && !t.firstInput) t.firstInput = init.firstInput;
     if (init.model) {
+      const prevModel = t.model;
       t.model = init.model;
       const ef = extractEffortFromModel(init.model);
       if (ef) t.thoughtLevel = ef;
+      else if (prevModel && init.model !== prevModel && !init.thoughtLevel) t.thoughtLevel = '';
       syncModelContextWindow(t, init.model);
     }
     if (init.thoughtLevel) t.thoughtLevel = init.thoughtLevel;
@@ -507,6 +522,144 @@ function getOrCreateTarget(sessionId, kind, init = {}) {
     t.loaded = false;
     targets.set(s.sessionId, t);
   }
+  writeAcpState();
+}
+
+export function writeAcpState({clear = false} = {}) {
+  const cfg = liveConfig();
+  const payload = {
+    version: 1,
+    daemonPid: process.pid,
+    port: Number(cfg.localPort) || CFG.localPort,
+    updatedAt: Date.now(),
+    sessions: {},
+  };
+  if (!clear) {
+    const now = Date.now();
+    for (const t of targets.values()) {
+      if (t.handoffCompleted && (
+        now - Number(t.handoffCompleted.endedAt || 0) > HANDOFF_NOTICE_TTL_MS
+        || (t.handoffCompleted.pid && !pidAlive(t.handoffCompleted.pid))
+      )) {
+        t.handoffCompleted = null;
+      }
+      if (t.pendingHandoff?.pid && !pidAlive(t.pendingHandoff.pid)) {
+        t.pendingHandoff = null;
+        t._lastHandoffTabTitle = '';
+      }
+      if (t.kind === 'acp') {
+        if (t.busy) {
+          payload.sessions[t.sessionId] = {
+            status: 'busy',
+            label: t.shortTitle(),
+            startedAt: t.currentRun?.startedAt || t.lastActivity || now,
+            tool: t.currentRun?.tool || '',
+            waitingPid: t.pendingHandoff?.pid || 0,
+          };
+        } else {
+          payload.sessions[t.sessionId] = {
+            status: 'idle',
+            label: t.shortTitle(),
+            updatedAt: t.lastActivity || now,
+          };
+        }
+      } else if (t.kind === 'tui' && t.handoffCompleted) {
+        payload.sessions[t.sessionId] = {
+          status: t.handoffCompleted.status,
+          stopped: Boolean(t.handoffCompleted.stopped),
+          label: t.shortTitle(),
+          endedAt: t.handoffCompleted.endedAt,
+          waitingPid: t.handoffCompleted.pid || 0,
+          snapshotTokens: t.handoffCompleted.snapshotTokens || 0,
+        };
+      }
+    }
+  }
+  try {
+    fs.mkdirSync(RUN_DIR, {recursive: true, mode: 0o700});
+    const tmp = `${ACP_STATE_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', {mode: 0o600});
+    fs.renameSync(tmp, ACP_STATE_FILE);
+  } catch {}
+}
+
+function registerPendingHandoff(t, {pid = 0, loc = {}, cwd = '', transcriptPath = '', totalTokens} = {}) {
+  if (!t) return;
+  const resolvedLoc = refreshTuiLoc(pid, loc);
+  const snapshotTokens = totalTokens === undefined
+    ? (t.pendingHandoff?.snapshotTokens || 0)
+    : (Number(totalTokens) || 0);
+  t.pendingHandoff = {
+    pid: Number(pid) || 0,
+    loc: resolvedLoc,
+    cwd: cwd || t.cwd,
+    transcriptPath: transcriptPath || t.transcriptPath || '',
+    snapshotTokens,
+    attachedAt: t.pendingHandoff?.attachedAt || Date.now(),
+  };
+  const cfg = liveConfig();
+  if (readNamingPref(cfg).enabled && (resolvedLoc?.tty || injectKind(resolvedLoc))) {
+    const title = `⏳ ${t.shortTitle()}`;
+    if (t._lastHandoffTabTitle !== title) {
+      t._lastHandoffTabTitle = title;
+      void setTabTitle(resolvedLoc, title);
+    }
+  }
+  writeAcpState();
+}
+
+async function completePendingHandoff(t, run) {
+  const h = t?.pendingHandoff;
+  if (!h || t.kind !== 'acp' || t.busy) {
+    writeAcpState();
+    return;
+  }
+  if (h.pid && !pidAlive(h.pid)) {
+    t.pendingHandoff = null;
+    t._lastHandoffTabTitle = '';
+    writeAcpState();
+    return;
+  }
+  if (t.loaded) {
+    try {
+      await acp.call('session/close', {sessionId: t.sessionId}, 10_000);
+      t.loaded = false;
+    } catch (e) {
+      log(`handoff session/close failed id=${t.sessionId.slice(0, 8)}: ${e.message}`);
+    }
+  }
+  const promoted = getOrCreateTarget(t.sessionId, 'tui', {
+    cwd: h.cwd || t.cwd,
+    pid: h.pid,
+    loc: h.loc,
+    transcriptPath: h.transcriptPath || t.transcriptPath,
+  });
+  promoted.pendingHandoff = null;
+  promoted._lastHandoffTabTitle = '';
+  const failed = Boolean(run?.error);
+  const stopped = Boolean(run?.stopped);
+  promoted.handoffCompleted = {
+    endedAt: Date.now(),
+    status: failed ? 'error' : 'done',
+    stopped,
+    pid: h.pid,
+    snapshotTokens: h.snapshotTokens || 0,
+  };
+  const cfg = liveConfig();
+  if (readNamingPref(cfg).enabled) {
+    const tabLabel = failed ? `× ${promoted.shortTitle()} · 请刷新` : `· ${promoted.shortTitle()} · 请刷新`;
+    promoted._lastTabTitle = tabLabel;
+    void setTabTitle(promoted.loc, tabLabel);
+  }
+  writeAcpState();
+  log(`hand off completed acp -> tui id=${promoted.sessionId.slice(0, 8)} pid=${promoted.pid}`);
+  const notifyTitle = failed
+    ? 'Agy Remote · 手机端任务失败'
+    : stopped
+      ? 'Agy Remote · 手机端任务已中断'
+      : 'Agy Remote · 手机端任务已完成';
+  const notifyBody = `「${promoted.label()}」已交接给当前终端，请在 Agy 中输入 /resume 刷新画面`;
+  desktopNotifier(notifyTitle, notifyBody);
 }
 
 /**
@@ -526,6 +679,7 @@ export function setSessionTitle(t, title, source = 'manual') {
     saveTuiSessions();
   } else if (t.kind === 'acp') {
     saveAcpSessions();
+    writeAcpState();
   }
 }
 
@@ -638,6 +792,7 @@ export const acp = new AcpClient({
 function syncConfigOptions(t, configOptions) {
   if (!Array.isArray(configOptions)) return;
   t.configOptions = configOptions;
+  const prevModel = t.model;
   const m = configOf(configOptions, 'model');
   if (m?.currentValue) {
     t.model = m.currentValue;
@@ -645,6 +800,9 @@ function syncConfigOptions(t, configOptions) {
   }
   const th = configOf(configOptions, 'thought_level');
   if (th?.currentValue) t.thoughtLevel = th.currentValue;
+  else if (m?.currentValue && m.currentValue !== prevModel) {
+    t.thoughtLevel = extractEffortFromModel(m.currentValue);
+  }
   const md = configOf(configOptions, 'mode');
   if (md?.currentValue) t.mode = md.currentValue;
 }
@@ -677,7 +835,11 @@ acp.on('update', (sessionId, update) => {
       t.contextWindowModel = t.model || '';
     }
   } else if (kind === 'tool_call' && t.currentRun) {
-    t.currentRun.tool = update.name || update.title || '';
+    const nextTool = update.name || update.title || '';
+    if (nextTool !== t.currentRun.tool) {
+      t.currentRun.tool = nextTool;
+      if (t.kind === 'acp') writeAcpState();
+    }
   } else if (kind === 'agent_message_chunk' && !t.replaying) {
     const chunk = update.content?.text || '';
     if (t.currentRun && chunk) t.currentRun.chunks.push(chunk);
@@ -702,6 +864,7 @@ acp.on('exit', () => {
       if (t.currentRun) t.currentRun.exited = true;
     }
   }
+  writeAcpState();
 });
 
 async function ensureAcpSession(t) {
@@ -752,6 +915,7 @@ async function createAcpSession(cwd, initMode = effectiveDefaultMode()) {
     } catch (e) { log(`set init mode failed: ${e.message}`); }
   }
   saveAcpSessions();
+  writeAcpState();
   return t;
 }
 
@@ -1137,12 +1301,20 @@ function buildCompactDone(t, run) {
 }
 
 function fmtQueued(t) {
-  return sessionText(t, {head: '⏳ 已排队', subject: t.label(), body: `前一轮仍在执行，当前有 ${t.queue.length} 条消息等待处理。`, foot: '发送 `停止` 中断当前任务并清空队列'});
+  const foot = t.kind === 'tui' && isLiveTarget(t)
+    ? '发送 `插话 内容` 可直接纠偏，或 `停止` 中断当前任务并清空队列'
+    : '发送 `停止` 中断当前任务并清空队列';
+  return sessionText(t, {head: '⏳ 已排队', subject: t.label(), body: `前一轮仍在执行，当前有 ${t.queue.length} 条消息等待处理。`, foot});
+}
+
+function displayModel(t, catalog = null) {
+  return formatModelLabel(t?.model || '', {configOptions: t?.configOptions, catalog});
 }
 
 function fmtAccepted(t, text = '') {
   const foot = [`目录：${dirLabel(t.cwd)}`];
-  if (t.model) foot.push(`模型：${t.model}`);
+  const modelLabel = displayModel(t);
+  if (modelLabel) foot.push(`模型：${modelLabel}`);
   return sessionText(t, {
     head: t.pendingMobileRun ? '⏳ 等待终端接收' : '⏳ 运行中',
     subject: t.label(),
@@ -1172,6 +1344,7 @@ function startAcpRun(t, text, media = [], operation = null) {
   run.beforeTokens = t.usedTokens;
   t.currentRun = run;
   t.lastActivity = Date.now();
+  writeAcpState();
 
   (async () => {
     try {
@@ -1226,6 +1399,10 @@ function startAcpRun(t, text, media = [], operation = null) {
         const next = t.queue.shift();
         const nextRun = startAcpRun(t, next.text, next.media);
         nextRun.asyncPushed = true;
+      } else if (!t.busy && t.kind === 'acp' && t.pendingHandoff) {
+        await completePendingHandoff(t, run);
+      } else {
+        writeAcpState();
       }
     }
   })();
@@ -1453,7 +1630,7 @@ async function buildSelectedCard(t) {
   const facts = [
     {keyname: '目录', value: tildeDir(t.cwd)},
     {keyname: '类型', value: kindOf(t)},
-    {keyname: '模型', value: t.model || '未知'},
+    {keyname: '模型', value: displayModel(t) || '未知'},
     {keyname: '上下文', value: contextFullLabel(t)},
   ];
   return stateCard({
@@ -1480,7 +1657,7 @@ function buildCreatedCard(t, note = '') {
   const facts = [
     {keyname: '目录', value: tildeDir(t.cwd)},
     {keyname: '类型', value: kindOf(t)},
-    {keyname: '模型', value: t.model || '未知'},
+    {keyname: '模型', value: displayModel(t) || '未知'},
   ];
   return stateCard({
     tag: 'created',
@@ -1495,7 +1672,7 @@ function buildCreatedCard(t, note = '') {
     fallback: () => plainText({
       head: '✏️ 会话已创建',
       subject: name,
-      foot: [`目录：${dirLabel(t.cwd)}`, `类型：${kindOf(t)}`, `模型：${t.model || '未知'}`, note, started ? '' : '发送 `创建会话 目录别名 消息`，指定目录'].filter(Boolean).join(' · '),
+      foot: [`目录：${dirLabel(t.cwd)}`, `类型：${kindOf(t)}`, `模型：${displayModel(t) || '未知'}`, note, started ? '' : '发送 `创建会话 目录别名 消息`，指定目录'].filter(Boolean).join(' · '),
     }),
   });
 }
@@ -1595,7 +1772,7 @@ async function buildModelCard(t, find = '') {
   if (!filtered.length) return plainText({head: '🔍 没有匹配的模型', subject: `“${clip(find, 16)}”`, body: `共 ${all.length} 个可选模型，没有找到包含该关键词的模型。`, foot: '发送 `模型` 查看全部'});
   const cardOpts = filtered.slice(0, VOTE_OPT_MAX).map((o) => ({
     id: registerPick({act: 'cfg', sessionId: t.sessionId, configId: 'model', value: o.value, label: o.name || o.value}),
-    text: clip(`${o.name || o.value}${modelMatchesCurrent(currentModel, o.value) ? ' · ← 当前' : ''}`, 60),
+    text: clip(`${o.name || o.value}${modelMatchesCurrent(currentModel, o.value, o.name) ? ' · ← 当前' : ''}`, 60),
   }));
   const card = {
     card_type: 'vote_interaction',
@@ -1606,7 +1783,7 @@ async function buildModelCard(t, find = '') {
     submit_text: '切换模型',
     task_id: taskId('model'),
   };
-  return cardBlock(card, '**请选择模型**', () => plainText({head: '⚠️ 卡片发送失败', subject: '切换模型', body: filtered.slice(0, VOTE_OPT_MAX).map((o) => `${o.name || o.value}${modelMatchesCurrent(currentModel, o.value) ? ' · ← 当前' : ''}`).join('\n'), foot: '发送 `模型 模型名` 直接切换'}));
+  return cardBlock(card, '**请选择模型**', () => plainText({head: '⚠️ 卡片发送失败', subject: '切换模型', body: filtered.slice(0, VOTE_OPT_MAX).map((o) => `${o.name || o.value}${modelMatchesCurrent(currentModel, o.value, o.name) ? ' · ← 当前' : ''}`).join('\n'), foot: '发送 `模型 模型名` 直接切换'}));
 }
 
 async function buildThinkCard(t, arg = '') {
@@ -1641,7 +1818,7 @@ async function buildThinkCard(t, arg = '') {
     }
   }
 
-  if (!all.length) return plainText({head: '🧠 当前模型不支持思考强度', subject: `${t.model || '未知模型'} · ${t.label()}`, foot: '发送 `模型` 换一个支持推理的模型'});
+  if (!all.length) return plainText({head: '🧠 当前模型不支持思考强度', subject: `${displayModel(t) || '未知模型'} · ${t.label()}`, foot: '发送 `模型` 换一个支持推理的模型'});
   const CN_TO_EN = {'低': 'low', '中': 'medium', '高': 'high', '超高': 'xhigh', '最高': 'max'};
   const want = CN_TO_EN[arg.trim()] || arg.trim().toLowerCase();
   if (want) {
@@ -1746,7 +1923,7 @@ async function applyConfigOption(t, configId, value, label) {
     saveTuiSessions();
     const facts = [
       {keyname: '会话', value: t.label()},
-      {keyname: '模型', value: t.model || '未知'},
+      {keyname: '模型', value: displayModel(t, catalog) || '未知'},
       ...(configId === 'thought_level' ? [] : [{keyname: '上下文', value: contextFullLabel(t)}]),
     ];
     return stateCard({
@@ -1790,7 +1967,7 @@ async function applyConfigOption(t, configId, value, label) {
 
   const facts = [
     {keyname: '会话', value: t.label()},
-    {keyname: '模型', value: t.model || '未知'},
+    {keyname: '模型', value: displayModel(t) || '未知'},
     ...(configId === 'thought_level' ? [] : [{keyname: '上下文', value: contextFullLabel(t)}]),
   ];
   return stateCard({
@@ -1914,9 +2091,9 @@ function footerInfo(t) {
   return [
     `目录：${dirLabel(t.cwd)}`,
     `类型：${kindOf(t)}`,
-    `模型：${t.model || '未知'}${t.thoughtLevel ? ` · ${t.thoughtLevel}` : ''}`,
+    `模型：${displayModel(t) || '未知'}${t.thoughtLevel ? ` · ${t.thoughtLevel}` : ''}`,
     `上下文：${contextFullLabel(t)}`,
-    ...(t.kind === 'acp' && t.mode ? [`模式：${t.mode}`] : []),
+    ...(t.kind === 'acp' && t.mode ? [`模式：${t.mode}（发 \`模式\` 切换）`] : []),
   ];
 }
 
@@ -1943,7 +2120,9 @@ function buildStatus(t = currentTarget()) {
   if (!t) return NO_BIND();
   const info = footerInfo(t).map((l) => `- ${l}`).join('\n');
   const tunnel = transport.connected ? [] : ['企微：断开'];
-  const stopHint = t === currentTarget() ? '发送 `停止` 停止' : '引用消息，回复会发给该会话';
+  const stopHint = t === currentTarget()
+    ? (t.kind === 'tui' && isLiveTarget(t) ? '发送 `插话 内容` 纠偏，或 `停止` 停止' : '发送 `停止` 停止')
+    : '引用消息，回复会发给该会话';
   if (t.busy || t.pendingMobileRun) {
     const r = t.currentRun || t.pendingMobileRun || {startedAt: Date.now()};
     const steerNote = t.steers?.length ? `，待注入插话 ${t.steers.length} 条` : '';
@@ -2120,6 +2299,7 @@ async function newTerminalSession(cwd, msg, media, ack) {
   t.loaded = false;
   t.kind = 'history';
   saveAcpSessions();
+  writeAcpState();
   const nonce = `tab_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
   const launcher = fileURLToPath(new URL('../bin/launch-agy.mjs', import.meta.url));
   const agyCmd = [process.execPath, launcher, RUN_DIR, t.sessionId].map(sq).join(' ');
@@ -2276,9 +2456,13 @@ const NL_ALIASES = [
   ['插话', 'steer', true],
   ['纠偏', 'steer', true],
   ['帮助', 'help', false],
+  ['更多命令', 'more', false],
+  ['进阶命令', 'more', false],
+  ['全部命令', 'more', false],
+  ['更多帮助', 'more', false],
 ].sort((a, b) => b[0].length - a[0].length);
 
-const COMMANDS = new Set(['ls', 'h', 'n', 'nb', 'model', 'think', 'mode', 'name', 'cd', 'compact', 'restart', 'art', 'recap', 'remote', 'mute', 'steer', 'status', 'usage', 'quota', 'stop', 'help']);
+const COMMANDS = new Set(['ls', 'h', 'n', 'nb', 'model', 'think', 'mode', 'name', 'cd', 'compact', 'restart', 'art', 'recap', 'remote', 'mute', 'steer', 'status', 'usage', 'quota', 'stop', 'help', 'more']);
 const BARE_ARGS = new Set(['h', 'n', 'nb', 'model', 'cd', 'think', 'mode', 'name', 'compact', 'restart', 'steer']);
 
 export function parseCmd(text) {
@@ -2288,10 +2472,13 @@ export function parseCmd(text) {
   if (/^(?:usage|quota|用量|查询用量|查看用量|额度|查询额度|查看额度)\s+(?:refresh|刷新)$/i.test(t)) {
     return {cmd: 'usage', rest: 'refresh'};
   }
+  if (/^(?:help|帮助)\s+(?:more|all|更多|全部|进阶)$/i.test(t)) {
+    return {cmd: 'help', rest: 'more'};
+  }
   for (const [word, cmd, hasArgs] of NL_ALIASES) {
     if (!t.startsWith(word)) continue;
     const tail = t.slice(word.length);
-    if (!tail) return {cmd, rest: ''};
+    if (!tail) return cmd === 'more' ? {cmd: 'help', rest: 'more'} : {cmd, rest: ''};
     if (!hasArgs || !/^\s/.test(tail)) continue;
     return {cmd, rest: tail.trim()};
   }
@@ -2299,8 +2486,9 @@ export function parseCmd(text) {
   if (!m) return null;
   const rawCmd = m[1].toLowerCase();
   if (!COMMANDS.has(rawCmd)) return null;
-  const cmd = rawCmd === 'quota' ? 'usage' : rawCmd;
   const rest = (m[2] || '').trim();
+  if (rawCmd === 'more') return rest ? null : {cmd: 'help', rest: 'more'};
+  const cmd = rawCmd === 'quota' ? 'usage' : rawCmd;
   if (rest && !BARE_ARGS.has(cmd)) return null;
   return {cmd, rest};
 }
@@ -2312,32 +2500,43 @@ const helpText = () => [
     "",
     "| 英文 | 中文 |",
     "|---|---|",
-    "| n / nb | 创建会话 / 后台会话 |",
-    "| ls / h | 活跃会话 / 历史会话 |",
+    "| n | 创建会话 |",
+    "| ls | 活跃会话 |",
     "| remote / mute | 关注 / 取关 |",
-    "| steer | 插话 |",
     "| model | 模型 |",
     "| think | 思考强度 |",
-    "| mode | 模式 |",
-    "| name | 命名 |",
     "| cd | 目录 |",
     "| compact | 压缩 |",
-    "| art | 产物 |",
     "| recap | 回顾 |",
     "| status | 状态 |",
     "| usage | 用量 |",
     "| stop | 停止 |",
-    "| restart | 重启 |",
-    "| help | 帮助 |",
+    "| help / help all | 帮助 / 更多帮助 |",
     "",
     "",
     "---",
     "",
     "**Tips**",
     "",
-    "> 1. 电脑端 `agy-remote config edit` 配置",
+    "> 1. 电脑终端 `agy-remote` 配置",
     "> 2. 先发附件，5 分钟内补文字一并发送",
     "> 3. 引用消息，可发送回复给相应会话",
+].join("\n");
+
+const moreHelpText = () => [
+    "**📖 更多帮助**",
+    "",
+    "---",
+    "",
+    "| 英文 | 中文 | 说明 |",
+    "|---|---|---|",
+    "| nb | 创建后台会话 | 后台 ACP 启动，不依赖终端 |",
+    "| h | 历史会话 | 检索并恢复历史会话（可加关键词） |",
+    "| steer | 插话 | 终端运行中注入纠偏指令 |",
+    "| mode | 模式 | 切换后台会话执行权限模式 |",
+    "| name | 命名 | 手动改名或管理自动命名 |",
+    "| art | 产物 | 查看或下载当前会话产物 |",
+    "| restart | 重启 | 重启服务（`重启 force` 强制） |",
 ].join("\n");
 
 const quoteRoutes = Array.isArray(loadState().quoteRoutes) ? loadState().quoteRoutes : [];
@@ -2465,7 +2664,7 @@ export async function handleCommand(text, media = [], ack = {media: false}, {quo
   }
 
   const {cmd, rest} = parsed;
-  if (cmd === 'help') return helpText();
+  if (cmd === 'help') return rest === 'more' ? moreHelpText() : helpText();
   if (cmd === 'ls') {
     const {live} = await buildRows();
     return buildLsCard(live);
@@ -2681,6 +2880,80 @@ export function resolveHookCwd(body = {}, existingCwd = '') {
   return rawCwd || workspaces[0] || os.homedir();
 }
 
+export async function handleAttachEvent(body = {}) {
+  const sid = String(body.conversationId || '').trim();
+  const pid = Number(body.pid) || 0;
+  const loc = body.loc || {};
+  const totalTokens = Number(body.totalTokens) || 0;
+  const refreshed = Boolean(body.refreshed);
+  if (!sid) return {ok: true, action: 'noop'};
+  const existing = targets.get(sid);
+  if (refreshed) {
+    if (existing?.handoffCompleted) {
+      existing.handoffCompleted = null;
+      updateTargetTabStatus(existing, existing.busy ? 'running' : 'idle', {
+        tabTitleEnabled: readNamingPref(liveConfig()).enabled,
+      });
+      writeAcpState();
+      return {ok: true, action: 'cleared'};
+    }
+    return {ok: true, action: 'noop'};
+  }
+  if (!existing) return {ok: true, action: 'noop', kind: 'none'};
+  if (existing.kind === 'tui') {
+    if (existing.handoffCompleted && totalTokens > 0 && totalTokens > (existing.handoffCompleted.snapshotTokens || 0)) {
+      existing.handoffCompleted = null;
+      updateTargetTabStatus(existing, existing.busy ? 'running' : 'idle', {
+        tabTitleEnabled: readNamingPref(liveConfig()).enabled,
+      });
+      writeAcpState();
+      return {ok: true, action: 'cleared'};
+    }
+    return {ok: true, action: 'noop', kind: 'tui'};
+  }
+  if (existing.kind !== 'acp') return {ok: true, action: 'noop', kind: existing.kind};
+
+  if (existing.busy) {
+    registerPendingHandoff(existing, {
+      pid,
+      loc,
+      cwd: resolveHookCwd(body, existing.cwd),
+      transcriptPath: body.transcriptPath || '',
+      totalTokens,
+    });
+    return {
+      ok: true,
+      action: 'waiting',
+      busy: true,
+      startedAt: existing.currentRun?.startedAt || existing.lastActivity,
+      tool: existing.currentRun?.tool || '',
+    };
+  }
+
+  if (existing.loaded) {
+    try {
+      await acp.call('session/close', {sessionId: sid}, 10_000);
+      existing.loaded = false;
+    } catch (e) {
+      return {ok: false, action: 'error', error: e.message};
+    }
+  }
+  const t = getOrCreateTarget(sid, 'tui', {
+    cwd: resolveHookCwd(body, existing.cwd),
+    pid,
+    loc,
+    transcriptPath: body.transcriptPath || '',
+  });
+  t.pendingHandoff = null;
+  t.handoffCompleted = null;
+  t._lastHandoffTabTitle = '';
+  refreshTargetContext(t, body.transcriptPath || '');
+  updateTargetTabStatus(t, 'idle', {tabTitleEnabled: readNamingPref(liveConfig()).enabled});
+  writeAcpState();
+  log(`hand off idle acp -> tui id=${sid.slice(0, 8)} pid=${t.pid}`);
+  return {ok: true, action: 'handed_off', busy: false};
+}
+
 export async function handleHookEvent(body) {
   const sid = body.conversationId;
   if (!sid) return {};
@@ -2700,7 +2973,9 @@ export async function handleHookEvent(body) {
     updateTargetTabStatus(t, 'idle', {tabTitleEnabled: false});
     t.kind = 'history'; t.loaded = false; t.busy = false; t.bgActive = false;
     t.currentRun = null; t.pendingMobileRun = null;
+    t.pendingHandoff = null; t.handoffCompleted = null; t._lastHandoffTabTitle = '';
     saveTuiSessions();
+    writeAcpState();
     if (run && !run.settled) {
       run.error = body.error || '终端已关闭，本轮未收到结束回传。';
       const msg = fmtFail(t, run);
@@ -2712,6 +2987,7 @@ export async function handleHookEvent(body) {
     return {};
   }
 
+  let handedOffFromAcp = false;
   if (existing?.kind === 'acp') {
     const blocked = (message) => ({
       injectSteps: [{systemMessage: {systemMessage: '', metadata: {user_markdown: message}}}],
@@ -2720,7 +2996,18 @@ export async function handleHookEvent(body) {
     if (existing.busy) {
       if (ev === 'Stop') return {};
       if (ev === 'PreToolUse') return {decision: 'deny', reason: '同一会话仍在后台执行，请等它结束后重试。'};
-      return blocked('⏳ 这个会话仍在后台执行。请等任务结束，再在当前终端发送消息；可在企微发送「停止」中断后台任务。');
+      registerPendingHandoff(existing, {
+        pid: body.pid || 0,
+        loc: body.loc || {},
+        cwd,
+        transcriptPath: body.transcriptPath || '',
+      });
+      const run = existing.currentRun;
+      const detailBits = [];
+      if (run?.startedAt) detailBits.push(`已运行 ${human(Date.now() - run.startedAt)}`);
+      if (run?.tool) detailBits.push(`当前动作：\`${run.tool}\``);
+      const detail = detailBits.length ? `（${detailBits.join(' · ')}）` : '';
+      return blocked(`⏳ 该会话仍在后台执行${detail}，本条消息暂未发出。完成后将自动交接给当前终端并提醒，届时请输入 \`/resume\` 重新选择本会话刷新画面；也可在企微发送「停止」中断。`);
     }
     if (existing.loaded) {
       try {
@@ -2730,6 +3017,10 @@ export async function handleHookEvent(body) {
         return blocked(`⚠️ 后台会话尚未释放，暂不能接到终端：${e.message}`);
       }
     }
+    existing.pendingHandoff = null;
+    existing.handoffCompleted = null;
+    existing._lastHandoffTabTitle = '';
+    handedOffFromAcp = true;
   }
 
   const t = getOrCreateTarget(sid, 'tui', {
@@ -2740,6 +3031,7 @@ export async function handleHookEvent(body) {
     loc: body.loc || {},
     transcriptPath: body.transcriptPath || '',
   });
+  if (handedOffFromAcp) writeAcpState();
   refreshTargetContext(t, body.transcriptPath || '');
 
   if (body.nonce && pendingTabs.has(body.nonce) && pendingTabs.get(body.nonce).sessionId === sid) {
@@ -2759,6 +3051,10 @@ export async function handleHookEvent(body) {
   if (ev === 'PreInvocation') {
     const cfg = liveConfig();
     if (input && !t.customName) triggerAutoNaming(t, input);
+    if (t.handoffCompleted) {
+      t.handoffCompleted = null;
+      writeAcpState();
+    }
     t.bgActive = false;
     if (!t.busy) {
       clearTimeout(t.pendingMobileRun?.acceptTimer);
@@ -2971,6 +3267,15 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 400, {error: e.message});
     }
   }
+  if (req.method === 'POST' && url.pathname === '/attach') {
+    try {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const reply = await handleAttachEvent(body);
+      return sendJson(res, 200, reply);
+    } catch (e) {
+      return sendJson(res, 400, {error: e.message});
+    }
+  }
   if ( req.method === 'POST' && url.pathname === '/name') {
     try {
       const body = JSON.parse((await readBody(req)) || '{}');
@@ -3001,7 +3306,10 @@ setInterval(() => {
       changed = true;
     }
   }
-  if (changed) saveAcpSessions();
+  if (changed) {
+    saveAcpSessions();
+    writeAcpState();
+  }
 }, 600_000).unref();
 
 let shuttingDown = false;
@@ -3009,6 +3317,7 @@ export async function shutdownDaemon({exit = process.env.AGY_REMOTE_NO_LISTEN !=
   if (shuttingDown) return;
   shuttingDown = true;
   log('daemon shutting down');
+  writeAcpState({clear: true});
   transport.drain();
   acp.stop();
   try { server.close(); } catch {}

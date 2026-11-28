@@ -168,9 +168,27 @@ test('formatUsageBody renders grouped markdown tables with compacted models and 
     'Gemini 4 (Neon / Carbon / Argon / Hydrogen) · Orchestrator (Neon / Carbon / Argon) · Gemini 3.8 Flash',
   );
   assert.equal(groupMatchesModel(groups[0], 'Gemini 4 Neon (Medium)'), true);
+  assert.equal(groupMatchesModel(groups[0], 'gemini-pro-orchestrator-neon'), true);
+  assert.equal(groupMatchesModel(groups[0], 'Orchestrator (Neon)'), true);
   assert.equal(groupMatchesModel(groups[1], 'claude-opus-5.5-high'), true);
+  assert.equal(groupMatchesModel(groups[1], 'gemini-pro-orchestrator-neon'), false);
   assert.equal(groupMatchesModel(groups[2], 'gemini-4-argon'), true);
+  assert.equal(groupMatchesModel(groups[2], 'gemini-pro-orchestrator-argon'), false);
   assert.equal(groupMatchesModel(groups[1], 'gemini-4-neon'), false);
+
+  const allOrchGroup = {
+    ...groups[0],
+    models: ['Gemini 4 Neon', 'Orchestrator (Neon)', 'Orchestrator (Carbon)', 'Orchestrator (Argon)'],
+  };
+  assert.equal(groupMatchesModel(allOrchGroup, 'gemini-pro-orchestrator'), true);
+  assert.equal(groupMatchesModel(allOrchGroup, 'gemini-pro-orchestrator-argon'), true);
+  assert.equal(groupMatchesModel(allOrchGroup, 'gemini-pro-orchestrator-g1-pro'), true);
+
+  // Even if server description omits Carbon variant, formatUsageBody falls back to Gemini Models group (never 3p or Argon-only)
+  const orchCarbonBody = formatUsageBody(groups, {now, currentModel: 'gemini-pro-orchestrator'});
+  assert.match(orchCarbonBody, /\*\*Gemini Models\*\* `当前`/);
+  assert.doesNotMatch(orchCarbonBody, /\*\*Claude and GPT models\*\* `当前`/);
+  assert.doesNotMatch(orchCarbonBody, /\*\*Gemini 4 Argon\*\* `当前`/);
 
   assert.equal(formatResetDuration(45 * 60_000), '45m');
   assert.equal(formatResetDuration(30_000), '1分钟内');

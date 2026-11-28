@@ -10,6 +10,7 @@ import {
   extractEffortFromModel,
   findModelEntry,
   resolveVariantByDisplayName,
+  formatModelLabel,
 } from '../daemon/models.mjs';
 
 const SAMPLE_MODELS_OUTPUT = [
@@ -25,7 +26,8 @@ const SAMPLE_MODELS_OUTPUT = [
   'gemini-4-hydrogen-medium        Gemini 4 Hydrogen (Medium)',
   'gemini-4-hydrogen-low           Gemini 4 Hydrogen (Low)',
   'gemini-pro-orchestrator-neon    Orchestrator (Neon)',
-  'gemini-pro-orchestrator-g1-pro  Orchestrator (Argon)',
+  'gemini-pro-orchestrator         Orchestrator (Carbon)',
+  'gemini-pro-orchestrator-argon   Orchestrator (Argon)',
   'gemini-3.8-flash-high           Gemini 3.8 Flash (High)',
   'gemini-3.8-flash-medium         Gemini 3.8 Flash (Medium)',
   'gemini-3.8-flash-low            Gemini 3.8 Flash (Low)',
@@ -40,7 +42,7 @@ const SAMPLE_MODELS_OUTPUT = [
 
 test('parseAgyModelsOutput groups multi-effort models identically to ACP configOptions', () => {
   const catalog = parseAgyModelsOutput(SAMPLE_MODELS_OUTPUT);
-  assert.equal(catalog.models.length, 9);
+  assert.equal(catalog.models.length, 10);
   assert.deepEqual(
     catalog.models.map((m) => [m.value, m.name]),
     [
@@ -48,7 +50,8 @@ test('parseAgyModelsOutput groups multi-effort models identically to ACP configO
       ['gemini-4-argon', 'Gemini 4 Argon'],
       ['gemini-4-hydrogen', 'Gemini 4 Hydrogen'],
       ['gemini-pro-orchestrator-neon', 'Orchestrator (Neon)'],
-      ['gemini-pro-orchestrator-g1-pro', 'Orchestrator (Argon)'],
+      ['gemini-pro-orchestrator', 'Orchestrator (Carbon)'],
+      ['gemini-pro-orchestrator-argon', 'Orchestrator (Argon)'],
       ['gemini-3.8-flash', 'Gemini 3.8 Flash'],
       ['claude-opus-5-5', 'Claude Opus 5.5'],
       ['claude-sonnet-5-5', 'Claude Sonnet 5.5'],
@@ -58,9 +61,21 @@ test('parseAgyModelsOutput groups multi-effort models identically to ACP configO
   assert.deepEqual(findModelEntry(catalog, 'gemini-4-neon-high').efforts, ['low', 'medium', 'high', 'xhigh']);
   assert.deepEqual(findModelEntry(catalog, 'claude-opus-5-5').efforts, ['low', 'medium', 'high']);
   assert.deepEqual(findModelEntry(catalog, 'gpt-oss-120b-medium').efforts, []);
+  assert.equal(findModelEntry(catalog, 'gemini-pro-orchestrator-argon').name, 'Orchestrator (Argon)');
+  assert.equal(findModelEntry(catalog, 'gemini-pro-orchestrator').name, 'Orchestrator (Carbon)');
   assert.equal(modelMatchesCurrent('gemini-4-neon-high', 'gemini-4-neon'), true);
   assert.equal(modelMatchesCurrent('gemini-4-neon', 'gemini-4-neon'), true);
   assert.equal(modelMatchesCurrent('gemini-pro-orchestrator-neon', 'gemini-4-neon'), false);
+  assert.equal(modelMatchesCurrent('gemini-pro-orchestrator-neon', 'gemini-pro-orchestrator'), false);
+  assert.equal(modelMatchesCurrent('gemini-pro-orchestrator-argon', 'gemini-pro-orchestrator'), false);
+  assert.equal(modelMatchesCurrent('gemini-pro-orchestrator', 'gemini-pro-orchestrator'), true);
+  assert.equal(modelMatchesCurrent('Orchestrator (Neon)', 'gemini-pro-orchestrator-neon', 'Orchestrator (Neon)'), true);
+  assert.equal(formatModelLabel('gemini-pro-orchestrator'), 'Orchestrator (Carbon)');
+  assert.equal(formatModelLabel('gemini-pro-orchestrator-neon'), 'Orchestrator (Neon)');
+  assert.equal(formatModelLabel('gemini-pro-orchestrator-argon'), 'Orchestrator (Argon)');
+  assert.equal(formatModelLabel('gemini-pro-orchestrator-g1-pro'), 'Orchestrator (Argon)');
+  assert.equal(formatModelLabel('gemini-pro-orchestrator-hydrogen'), 'Orchestrator (Hydrogen)');
+  assert.equal(formatModelLabel('gemini-4-neon-high'), 'gemini-4-neon-high');
   assert.equal(extractEffortFromModel('gemini-4-neon-xhigh'), 'xhigh');
   assert.equal(extractEffortFromModel('Gemini 4 Argon (Medium)'), 'medium');
   assert.deepEqual(
@@ -91,7 +106,7 @@ test('injectable live terminal switches model and effort via native slash comman
         `const litIdx = args.indexOf('-l');\n` +
         `if (litIdx >= 0) {\n` +
         `  const text = args[litIdx + 1] || '';\n` +
-        `  const map = {'/model gemini-4-argon': 'Gemini 4 Argon (Medium)', '/model claude-opus-5-5': 'Claude Opus 5.5 (Medium)', '/effort high': 'Claude Opus 5.5 (High)'};\n` +
+        `  const map = {'/model gemini-4-argon': 'Gemini 4 Argon (Medium)', '/model claude-opus-5-5': 'Claude Opus 5.5 (Medium)', '/effort high': 'Claude Opus 5.5 (High)', '/model gemini-pro-orchestrator-neon': 'Orchestrator (Neon)', '/model gemini-pro-orchestrator': 'Orchestrator (Carbon)'};\n` +
         `  if (map[text]) fs.writeFileSync(${JSON.stringify(settingsFile)}, JSON.stringify({model: map[text]}));\n` +
         `}\n`,
       {mode: 0o755},
@@ -123,7 +138,7 @@ test('injectable live terminal switches model and effort via native slash comman
 
       const card = await handleCommand('模型');
       assert.equal(card.card.card_type, 'vote_interaction');
-      assert.equal(card.card.options.length, 9);
+      assert.equal(card.card.options.length, 10);
       assert.equal(card.card.options[0].text, 'Gemini 4 Neon · ← 当前');
 
       const argonOpt = card.card.options.find((o) => o.text.startsWith('Gemini 4 Argon'));
@@ -144,6 +159,21 @@ test('injectable live terminal switches model and effort via native slash comman
       assert.equal(thinkDone.card.main_title.title, '🧠 切换思考强度');
       assert.equal(thinkDone.card.emphasis_content.title, 'high · 高');
 
+      // Switch to Orchestrator (Neon): only Neon is marked current (Carbon must not collide on prefix), display uses readable name and clears stale thoughtLevel
+      const orchNeon = await handleCommand('模型 orchestrator-neon');
+      assert.equal(orchNeon.card.main_title.title, '💡 切换模型');
+      assert.ok(orchNeon.card.horizontal_content_list.some((f) => f.keyname === '模型' && f.value === 'Orchestrator (Neon)'));
+      const orchCard = await handleCommand('模型 orchestrator');
+      assert.deepEqual(
+        orchCard.card.options.filter((o) => o.text.includes('← 当前')).map((o) => o.text),
+        ['Orchestrator (Neon) · ← 当前'],
+      );
+      const carbonOpt = orchCard.card.options.find((o) => o.text.startsWith('Orchestrator (Carbon)'));
+      const orchCarbon = await handleCardCallback({taskId: orchCard.card.task_id, optionId: carbonOpt.id});
+      assert.ok(orchCarbon.card.horizontal_content_list.some((f) => f.keyname === '模型' && f.value === 'Orchestrator (Carbon)'));
+      const orchStatus = await handleCommand('状态');
+      assert.match(orchStatus, /模型：Orchestrator \\(Carbon\\)(?!\\s*·)/);
+
       const modeNotice = await handleCommand('模式');
       assert.match(modeNotice, /Shift\\+Tab/);
 
@@ -153,7 +183,7 @@ test('injectable live terminal switches model and effort via native slash comman
 
       const cmds = fs.readFileSync(${JSON.stringify(commandLog)}, 'utf8').trim().split('\\n').map(JSON.parse);
       const injected = cmds.filter((c) => c.includes('-l')).map((c) => c[c.indexOf('-l') + 1]);
-      assert.deepEqual(injected, ['/model gemini-4-argon', '/model claude-opus-5-5', '/effort high']);
+      assert.deepEqual(injected, ['/model gemini-4-argon', '/model claude-opus-5-5', '/effort high', '/model gemini-pro-orchestrator-neon', '/model gemini-pro-orchestrator']);
     `;
 
     execFileSync(process.execPath, ['--input-type=module', '-e', script], {
